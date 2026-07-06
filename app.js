@@ -81,7 +81,10 @@ const migrationText = document.getElementById('migrationText');
 const migrateBtn = document.getElementById('migrateBtn');
 const dismissMigrateBtn = document.getElementById('dismissMigrateBtn');
 
+const sortOrder = document.getElementById('sortOrder');
+
 const filters = { year: '', month: '', type: '', vat: '' };
+let sortMode = 'dateDesc';
 
 window.addAccountFromForm = handleAccountSubmit;
 
@@ -111,6 +114,7 @@ function init() {
   filterType.addEventListener('change', handleFilterChange);
   filterVat.addEventListener('change', handleFilterChange);
   filterReset.addEventListener('click', resetFilters);
+  sortOrder.addEventListener('change', handleSortChange);
   accountFormSubmitBtn.addEventListener('click', handleAccountSubmit);
   accountFile.addEventListener('change', handleUpload);
   ledgerFile.addEventListener('change', handleLedgerImport);
@@ -440,11 +444,33 @@ function renderEntries() {
   });
 
   const visibleEntries = enrichedEntries.filter(matchesFilters);
+  // Der Bestand oben wird chronologisch berechnet; hier nur die Anzeige-Reihenfolge.
+  const displayEntries = applySortOrder(visibleEntries);
 
-  entryCountEl.textContent = `${visibleEntries.length} Einträge`;
-  renderBookingTable(cashEntriesTableBody, visibleEntries.filter((entry) => entry.wallet === 'cash'), 'cash');
-  renderBookingTable(bankEntriesTableBody, visibleEntries.filter((entry) => entry.wallet === 'bank'), 'bank');
-  renderBookingTable(totalEntriesTableBody, visibleEntries, 'all');
+  entryCountEl.textContent = `${displayEntries.length} Einträge`;
+  renderBookingTable(cashEntriesTableBody, displayEntries.filter((entry) => entry.wallet === 'cash'), 'cash');
+  renderBookingTable(bankEntriesTableBody, displayEntries.filter((entry) => entry.wallet === 'bank'), 'bank');
+  renderBookingTable(totalEntriesTableBody, displayEntries, 'all');
+}
+
+function applySortOrder(entries) {
+  const list = [...entries];
+  switch (sortMode) {
+    case 'dateAsc':
+      return list.sort((a, b) => new Date(a.date) - new Date(b.date));
+    case 'amountDesc':
+      return list.sort((a, b) => b.amount - a.amount);
+    case 'amountAsc':
+      return list.sort((a, b) => a.amount - b.amount);
+    case 'dateDesc':
+    default:
+      return list.sort((a, b) => new Date(b.date) - new Date(a.date));
+  }
+}
+
+function handleSortChange() {
+  sortMode = sortOrder.value;
+  renderEntries();
 }
 
 function matchesFilters(entry) {
