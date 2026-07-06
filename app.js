@@ -1,3 +1,4 @@
+// Version: Kontenplan-Favoriten
 const STORAGE_KEY = 'football-finance-state';
 const walletLabels = {
   cash: 'Kasse',
