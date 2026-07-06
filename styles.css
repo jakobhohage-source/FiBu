@@ -4,8 +4,8 @@
   --card: #ffffff;
   --text: #172033;
   --muted: #64748b;
-  --accent: #1f6feb;
-  --accent-soft: #e8f0ff;
+  --accent: #1a8c3c;
+  --accent-soft: #e6f4ea;
   --positive: #0f9d58;
   --negative: #d14343;
   --border: #e2e8f0;
@@ -74,6 +74,24 @@ body {
   flex-direction: column;
   align-items: flex-end;
   gap: 8px;
+}
+
+.hero-brand {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.logo {
+  height: 72px;
+  width: auto;
+  flex-shrink: 0;
+}
+
+.auth-logo {
+  height: 88px;
+  align-self: center;
+  margin-bottom: 4px;
 }
 
 .auth-overlay {
