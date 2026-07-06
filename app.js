@@ -214,7 +214,7 @@ async function loadStateFromCloud() {
 
 // Feldnamen-Übersetzung zwischen DB (snake_case) und App (camelCase).
 function rowToAccount(row) {
-  return { id: row.id, code: row.code, label: row.label, type: row.type || 'other' };
+  return { id: row.id, code: row.code, label: row.label, type: row.type || 'other', favorite: row.favorite === true };
 }
 
 function rowToEntry(row) {
@@ -397,14 +397,16 @@ function renderHeaders() {
 
 function renderAccountSelect() {
   const currentValue = accountSelect.value;
-  accountSelect.innerHTML = state.accounts
-    .map((account) => `<option value="${account.code}">${account.code} · ${account.label}</option>`)
+  // Favoriten zuerst; innerhalb der Gruppen bleibt die bisherige Reihenfolge (nach Kontonummer).
+  const sortedAccounts = [...state.accounts].sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
+  accountSelect.innerHTML = sortedAccounts
+    .map((account) => `<option value="${account.code}">${account.favorite ? '★ ' : ''}${account.code} · ${account.label}</option>`)
     .join('');
 
   if (state.accounts.some((account) => account.code === currentValue)) {
     accountSelect.value = currentValue;
-  } else if (state.accounts.length) {
-    accountSelect.value = state.accounts[0].code;
+  } else if (sortedAccounts.length) {
+    accountSelect.value = sortedAccounts[0].code;
   }
 }
 
@@ -550,6 +552,7 @@ function renderAccounts() {
         <td>${escapeHtml(account.label)}</td>
         <td>${escapeHtml(accountTypeLabels[account.type] || account.type)}</td>
         <td>
+          <button class="account-action-btn favorite ${account.favorite ? 'active' : ''}" type="button" data-action="favorite" data-id="${account.id}" title="Als Favorit markieren" aria-pressed="${account.favorite ? 'true' : 'false'}">${account.favorite ? '★' : '☆'}</button>
           <button class="account-action-btn" type="button" data-action="edit" data-id="${account.id}">Bearbeiten</button>
           <button class="account-action-btn danger" type="button" data-action="delete" data-id="${account.id}">Löschen</button>
         </td>
@@ -999,6 +1002,24 @@ async function handleAccountTableAction(event) {
   if (!button) return;
 
   const id = button.dataset.id;
+  if (button.dataset.action === 'favorite') {
+    const account = state.accounts.find((entry) => entry.id === id);
+    if (!account) return;
+    const newFavorite = !account.favorite;
+    try {
+      const { error } = await supabaseClient.from('accounts').update({ favorite: newFavorite }).eq('id', id);
+      if (error) throw error;
+    } catch (error) {
+      statusEl.textContent = 'Favorit konnte nicht gespeichert werden. Ist die Spalte "favorite" in Supabase angelegt?';
+      return;
+    }
+    account.favorite = newFavorite;
+    renderAccountSelect();
+    renderAccounts();
+    statusEl.textContent = newFavorite ? 'Als Favorit markiert.' : 'Favorit entfernt.';
+    return;
+  }
+
   if (button.dataset.action === 'delete') {
     try {
       const { error } = await supabaseClient.from('accounts').delete().eq('id', id);

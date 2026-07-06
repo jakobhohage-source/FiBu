@@ -450,6 +450,18 @@ button.secondary {
   color: var(--negative);
 }
 
+.account-action-btn.favorite {
+  color: #b0b6c0;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 6px 9px;
+}
+
+.account-action-btn.favorite.active {
+  color: #f5a623;
+  border-color: #f5a623;
+}
+
 .export-btn {
   padding: 6px 10px;
   font-size: 0.9rem;
