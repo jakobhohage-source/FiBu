@@ -398,10 +398,14 @@ function renderHeaders() {
 
 function renderAccountSelect() {
   const currentValue = accountSelect.value;
-  // Favoriten zuerst; innerhalb der Gruppen bleibt die bisherige Reihenfolge (nach Kontonummer).
-  const sortedAccounts = [...state.accounts].sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
+  // Favoriten zuerst, dann alphabetisch nach Kontoname; innerhalb der Favoriten ebenfalls alphabetisch.
+  const sortedAccounts = [...state.accounts].sort((a, b) => {
+    const favDiff = (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0);
+    if (favDiff !== 0) return favDiff;
+    return a.label.localeCompare(b.label, 'de', { sensitivity: 'base' });
+  });
   accountSelect.innerHTML = sortedAccounts
-    .map((account) => `<option value="${account.code}">${account.favorite ? '★ ' : ''}${account.code} · ${account.label}</option>`)
+    .map((account) => `<option value="${account.code}">${account.favorite ? '★ ' : ''}${escapeHtml(account.label)}</option>`)
     .join('');
 
   if (state.accounts.some((account) => account.code === currentValue)) {
@@ -656,7 +660,7 @@ async function handleSubmit(event) {
     movementType,
     wallet: document.getElementById('wallet').value,
     accountCode: accountSelect.value,
-    accountLabel: accountSelect.options[accountSelect.selectedIndex]?.text.split('· ')[1] || 'Unbekannt',
+    accountLabel: (state.accounts.find((account) => account.code === accountSelect.value) || {}).label || 'Unbekannt',
     description,
     statementNumber: document.getElementById('statementNumber').value.trim(),
     text: description,
