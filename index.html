@@ -315,10 +315,18 @@
                   <option value="other">Sonstiges</option>
                 </select>
               </label>
-              <div class="form-actions">
-                <button id="accountFormSubmit" type="button" onclick="window.addAccountFromForm()">Speichern</button>
-                <button id="cancelAccountEdit" class="secondary" type="reset">Abbrechen</button>
-              </div>
+              <label>
+                <span>Steuersatz</span>
+                <select id="accountTaxRate">
+                  <option value="">Keine</option>
+                  <option value="7">7%</option>
+                  <option value="19">19%</option>
+                </select>
+              </label>
+            </div>
+            <div class="form-actions">
+              <button id="accountFormSubmit" type="button" onclick="window.addAccountFromForm()">Speichern</button>
+              <button id="cancelAccountEdit" class="secondary" type="reset">Abbrechen</button>
             </div>
           </form>
           <div class="table-wrap">
@@ -328,12 +336,17 @@
                   <th>Kontonummer</th>
                   <th>Bezeichnung</th>
                   <th>Typ</th>
+                  <th>Steuer</th>
                   <th>Aktion</th>
                 </tr>
               </thead>
               <tbody id="accountsTableBody"></tbody>
             </table>
           </div>
+          <div class="report-controls" style="margin-top:14px;">
+            <button id="applyTaxToEntries" class="secondary" type="button">Steuersätze auf bestehende Buchungen anwenden</button>
+          </div>
+          <p class="meta">Setzt bei allen Buchungen ohne Steuersatz den hinterlegten Satz des jeweiligen Kontos (korrigiert z. B. importierte Altdaten).</p>
         </div>
       </section>
     </div>

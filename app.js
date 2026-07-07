@@ -42,6 +42,8 @@ const bookingForm = document.getElementById('bookingForm');
 const bookingSubmitBtn = document.getElementById('bookingSubmit');
 const accountForm = document.getElementById('accountForm');
 const accountSelect = document.getElementById('accountSelect');
+const accountTaxRate = document.getElementById('accountTaxRate');
+const applyTaxBtn = document.getElementById('applyTaxToEntries');
 const accountFile = document.getElementById('accountFile');
 const ledgerFile = document.getElementById('ledgerFile');
 const statusEl = document.getElementById('accountPlanStatus');
@@ -109,6 +111,8 @@ function init() {
     document.getElementById(id).addEventListener('input', recalcTax);
     document.getElementById(id).addEventListener('change', recalcTax);
   });
+  accountSelect.addEventListener('change', applyAccountTaxToForm);
+  applyTaxBtn.addEventListener('click', applyTaxToExistingEntries);
   document.querySelectorAll('.entries-table').forEach((table) => {
     table.addEventListener('click', handleBookingTableAction);
   });
@@ -218,7 +222,14 @@ async function loadStateFromCloud() {
 
 // Feldnamen-Übersetzung zwischen DB (snake_case) und App (camelCase).
 function rowToAccount(row) {
-  return { id: row.id, code: row.code, label: row.label, type: row.type || 'other', favorite: row.favorite === true };
+  return {
+    id: row.id,
+    code: row.code,
+    label: row.label,
+    type: row.type || 'other',
+    favorite: row.favorite === true,
+    taxRate: row.tax_rate == null ? '' : String(row.tax_rate)
+  };
 }
 
 function rowToEntry(row) {
@@ -565,6 +576,7 @@ function renderAccounts() {
         <td>${escapeHtml(account.code)}</td>
         <td>${escapeHtml(account.label)}</td>
         <td>${escapeHtml(accountTypeLabels[account.type] || account.type)}</td>
+        <td>${account.taxRate ? account.taxRate + '%' : '—'}</td>
         <td>
           <button class="account-action-btn favorite ${account.favorite ? 'active' : ''}" type="button" data-action="favorite" data-id="${account.id}" title="Als Favorit markieren" aria-pressed="${account.favorite ? 'true' : 'false'}">${account.favorite ? '★' : '☆'}</button>
           <button class="account-action-btn" type="button" data-action="edit" data-id="${account.id}">Bearbeiten</button>
@@ -984,6 +996,8 @@ async function handleAccountSubmit(event) {
   const code = document.getElementById('accountCode').value.trim();
   const label = document.getElementById('accountLabel').value.trim();
   const type = document.getElementById('accountType').value;
+  const taxRate = accountTaxRate.value;
+  const tax_rate = taxRate === '' ? null : taxRate;
 
   if (!code || !label) {
     return;
@@ -991,16 +1005,16 @@ async function handleAccountSubmit(event) {
 
   try {
     if (id) {
-      const { error } = await supabaseClient.from('accounts').update({ code, label, type }).eq('id', id);
+      const { error } = await supabaseClient.from('accounts').update({ code, label, type, tax_rate }).eq('id', id);
       if (error) throw error;
-      state.accounts = state.accounts.map((account) => account.id === id ? { ...account, code, label, type } : account);
+      state.accounts = state.accounts.map((account) => account.id === id ? { ...account, code, label, type, taxRate } : account);
     } else {
-      const { data, error } = await supabaseClient.from('accounts').insert({ code, label, type }).select().single();
+      const { data, error } = await supabaseClient.from('accounts').insert({ code, label, type, tax_rate }).select().single();
       if (error) throw error;
       state.accounts.push(rowToAccount(data));
     }
   } catch (error) {
-    statusEl.textContent = 'Konto konnte nicht gespeichert werden.';
+    statusEl.textContent = 'Konto konnte nicht gespeichert werden. Ist die Spalte "tax_rate" in Supabase angelegt?';
     return;
   }
 
@@ -1057,6 +1071,7 @@ async function handleAccountTableAction(event) {
   document.getElementById('accountCode').value = account.code;
   document.getElementById('accountLabel').value = account.label;
   document.getElementById('accountType').value = account.type;
+  accountTaxRate.value = account.taxRate || '';
   activateTab('accounts');
 }
 
@@ -1064,6 +1079,54 @@ function resetAccountForm() {
   accountForm.reset();
   document.getElementById('accountId').value = '';
   document.getElementById('accountType').value = 'asset';
+  accountTaxRate.value = '';
+}
+
+// Bei Kontowahl im Buchungsformular den hinterlegten Steuersatz automatisch übernehmen.
+function applyAccountTaxToForm() {
+  const account = state.accounts.find((item) => item.code === accountSelect.value);
+  document.getElementById('percent').value = account && account.taxRate ? account.taxRate : '';
+  recalcTax();
+}
+
+// Einmalige Korrektur: bei Buchungen ohne Steuersatz den Satz des Kontos setzen.
+async function applyTaxToExistingEntries() {
+  const taxByCode = new Map(state.accounts.filter((a) => a.taxRate).map((a) => [a.code, a.taxRate]));
+  const toFix = state.entries.filter((entry) => {
+    const hasPercent = entry.percent !== '' && entry.percent != null;
+    return !hasPercent && entry.accountCode && taxByCode.has(entry.accountCode);
+  });
+
+  if (!toFix.length) {
+    window.alert('Keine passenden Buchungen gefunden.\n\nHinterlege zuerst im Kontenplan bei den betroffenen Konten (z. B. 37 Eintritt = 7 %, 78 Bandenwerbung = 19 %) den Steuersatz.');
+    return;
+  }
+  if (!window.confirm(`${toFix.length} Buchung(en) ohne Steuersatz erhalten den Satz ihres Kontos. Fortfahren?`)) return;
+
+  applyTaxBtn.disabled = true;
+  let done = 0;
+  try {
+    for (const entry of toFix) {
+      const percent = taxByCode.get(entry.accountCode);
+      const included = entry.amount * (Number(percent) / (100 + Number(percent)));
+      const preTax = entry.movementType === 'expense' ? included : 0;
+      const vat = entry.movementType === 'income' ? included : 0;
+      const { error } = await supabaseClient.from('entries').update({ percent, pre_tax: preTax, vat }).eq('id', entry.id);
+      if (error) throw error;
+      entry.percent = percent;
+      entry.preTax = preTax;
+      entry.vat = vat;
+      done++;
+    }
+    renderSummary();
+    renderEntries();
+    window.alert(`${done} Buchung(en) mit dem jeweiligen Konto-Steuersatz aktualisiert.`);
+    statusEl.textContent = `${done} Buchungen mit Steuersatz ergänzt.`;
+  } catch (error) {
+    window.alert(`Es wurden ${done} von ${toFix.length} aktualisiert, dann trat ein Fehler auf: ${error?.message || 'unbekannt'}`);
+  } finally {
+    applyTaxBtn.disabled = false;
+  }
 }
 
 function exportEntries(wallet) {
