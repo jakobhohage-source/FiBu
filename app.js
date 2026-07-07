@@ -87,6 +87,7 @@ const dismissMigrateBtn = document.getElementById('dismissMigrateBtn');
 const sortOrder = document.getElementById('sortOrder');
 const reportYear = document.getElementById('reportYear');
 const exportTaxReportBtn = document.getElementById('exportTaxReport');
+const exportYearReportBtn = document.getElementById('exportYearReport');
 
 const filters = { year: '', month: '', type: '', vat: '' };
 let sortMode = 'dateDesc';
@@ -123,6 +124,7 @@ function init() {
   filterReset.addEventListener('click', resetFilters);
   sortOrder.addEventListener('change', handleSortChange);
   exportTaxReportBtn.addEventListener('click', exportTaxReport);
+  exportYearReportBtn.addEventListener('click', exportYearReport);
   accountFormSubmitBtn.addEventListener('click', handleAccountSubmit);
   accountFile.addEventListener('change', handleUpload);
   ledgerFile.addEventListener('change', handleLedgerImport);
@@ -1226,6 +1228,154 @@ function exportTaxReport() {
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, 'Steuerliche Vorfälle');
   XLSX.writeFile(workbook, `Steuerliche-Vorfaelle-${year}.xlsx`);
+}
+
+// Summen je Kontonummer für ein Jahr.
+function yearSums(year) {
+  const inc = {};
+  const exp = {};
+  state.entries.filter((entry) => (entry.date || '').slice(0, 4) === year).forEach((entry) => {
+    const code = entry.accountCode || '';
+    if (entry.movementType === 'income') inc[code] = (inc[code] || 0) + entry.amount;
+    else exp[code] = (exp[code] || 0) + entry.amount;
+  });
+  return { inc, exp };
+}
+
+// Journal-Zeilen (Bank/Kasse) für ein Jahr, mit fortlaufendem Bestand (chronologisch).
+function yearLedgerRows(wallet, year) {
+  const sorted = [...state.entries].filter((entry) => entry.wallet === wallet).sort((a, b) => new Date(a.date) - new Date(b.date));
+  let balance = 0;
+  const rows = [['Datum', 'Auszug/lfd. Nr.', 'Text', '%', 'Vorst. enth.', 'MWSt enth.', 'Einnahmen', 'Ausgabe', 'gebucht', 'Bestand']];
+  sorted.forEach((entry) => {
+    balance += entry.movementType === 'income' ? entry.amount : -entry.amount;
+    if ((entry.date || '').slice(0, 4) !== year) return;
+    const tax = includedTax(entry);
+    rows.push([
+      entry.date,
+      entry.statementNumber,
+      entry.text || entry.description,
+      entry.percent ? `${entry.percent}%` : '',
+      entry.movementType === 'expense' && tax ? round2(tax) : '',
+      entry.movementType === 'income' && tax ? round2(tax) : '',
+      entry.movementType === 'income' ? round2(entry.amount) : '',
+      entry.movementType === 'expense' ? round2(entry.amount) : '',
+      entry.accountCode || '',
+      round2(balance)
+    ]);
+  });
+  return rows;
+}
+
+function closingBalance(wallet, year) {
+  return round2(state.entries
+    .filter((entry) => entry.wallet === wallet && (entry.date || '') <= `${year}-12-31`)
+    .reduce((sum, entry) => sum + (entry.movementType === 'income' ? entry.amount : -entry.amount), 0));
+}
+
+// Bericht: Jahresabschluss – offizielles Formular-Layout mit automatisch summierten Konto-Beträgen.
+function exportYearReport() {
+  const year = reportYear.value;
+  const sums = yearSums(year);
+  const inc = (code) => round2(sums.inc[code] || 0);
+  const exp = (code) => round2(sums.exp[code] || 0);
+  const sumInc = (list) => round2(list.reduce((sum, code) => sum + (sums.inc[code] || 0), 0));
+  const sumExp = (list) => round2(list.reduce((sum, code) => sum + (sums.exp[code] || 0), 0));
+  const range = (a, b) => { const out = []; for (let i = a; i <= b; i++) out.push(String(i)); return out; };
+
+  const rows = [];
+  const R = (a = '', b = '', c = '', d = '', e = '') => rows.push([a, b, c, d, e]);
+
+  R('Polizei-Sportvereinigung Bochum e.V.', '', '', '', 'Abteilung Fußball');
+  R('', `Geschäftsjahr ${year}`);
+  R('', 'AUTOMATISCH aus der Buchführung summiert – manuell umkategorisierte Posten (Durchläufe über HV usw.) bitte prüfen!');
+  R();
+  R('', '', 'Einnahmen', '', 'Ausgaben');
+  R();
+
+  // I. Steuerfreier Bereich
+  R('I. Steuerfreier Bereich');
+  R('', 'Einnahmen');
+  R('A.', 'Ideeller Bereich');
+  [['1', '1. Mitgliedsbeiträge'], ['2', '2. Aufnahmegebühren'], ['3', '3. Spenden'], ['4', '4. Zuschüsse'], ['5', '5. Anteilige Kosten'], ['6', '6. Kursgebühren'], ['7', '7. Sonstiges/Erstattungen/Überschussverteilung']].forEach(([a, l]) => R(a, l, inc(a)));
+  R('B.', 'Vermögensverwaltung');
+  [['8', '1. Zinserträge'], ['9', '2. Mahngebühren'], ['10', '3. Pachteinnahmen'], ['11', '4. Erlöse Geräteverkauf'], ['12', '5. Kreditaufnahme'], ['13', '6. Sonstiges']].forEach(([a, l]) => R(a, l, inc(a)));
+  R('', 'Einnahmen (A + B)', sumInc(range(1, 13)));
+  R('', 'Interne Buchungen (nachrichtlich):');
+  [['14', 'AG Bochum Strafen über HV'], ['15', 'Spenden an Abteilung über HV'], ['16', 'Zuschüsse an Abteilung über HV (Übungsleiter LSB)'], ['17', 'Überschussverteilung des HV']].forEach(([a, l]) => R(a, l, inc(a)));
+  R();
+  R('', 'Ausgaben');
+  [['18', '2. Verwaltungskosten der Abteilung'], ['19', '3. Bankgebühren'], ['20', '4. Beitragsrückerstattung'], ['21', '5. Ehrungen/Mitgliederpflege'], ['22', '6. Verbandsabgaben/Fachverband'], ['23', '7. Versicherungen PKW'], ['24', '8. Aufwandsentschädigung'], ['25', '9. Betriebskosten PKW'], ['26', '10. Büroausstattung'], ['27', '11. Werbung/Öffentlichkeitsarbeit'], ['28', '12. Reparaturen'], ['29', '13. Mitgliederversammlung'], ['30', '14. Unterhaltung Vereinslokal'], ['31', '15. Sonstige Ausgaben']].forEach(([a, l]) => R(a, l, '', '', exp(a)));
+  R('', 'Interne Buchungen:');
+  [['32', '1. Beiträge der Abteilung an HV'], ['33', '2. Umsatzsteueranteil'], ['34', '3. Anteil Sportstättenbenutzungsgeb.'], ['35', '4. Darlehenstilgung'], ['36', '5. Sonstiges']].forEach(([a, l]) => R(a, l, '', '', exp(a)));
+  R();
+  R('', 'Summe Abschnitt I', sumInc(range(1, 17)), '', sumExp(range(18, 36)));
+  R();
+
+  // II. Zweckbetrieb
+  R('II. Zweckbetrieb – Sportliche Veranstaltungen');
+  R('', 'Einnahmen');
+  [['37', '1. Eintrittsgelder inkl. 7% MWSt'], ['38', '2. Eintrittsgelder inkl. 5% MWSt'], ['39', '3. Zuschuss'], ['40', '4. Eintritt Einnahmen-Teilung'], ['41', '5. Ausbildungsentschädigung'], ['42', '6. VKG-Erstattung v. Klaudia Post'], ['43', '7. Sonstiges/Erstattungen']].forEach(([a, l]) => R(a, l, inc(a)));
+  R('', 'Ausgaben');
+  [['44', '1. Kosten für Sportanlagen'], ['45', '2. Sportgeräte/Sportbekleidung'], ['46', '3. Startgelder'], ['47', '4. Fahrtkosten'], ['48', '5. Aufwandsentschädigungen'], ['49', '6. Schiedsrichter'], ['50', '7. Ordnungsgebühren (Verband)'], ['51', '8. Fürsorge'], ['52', '9. Sieger-/Sportlerehrungen'], ['53', '10. Versorgung'], ['54', '11. Ablösezahlung'], ['55', '12. Ablösezahlungen'], ['56', '13. Jugendleiter'], ['57', '14. Lehrgänge'], ['58', '15. Übungsleiter/Betreuer'], ['59', '16. Veranstaltungen'], ['81', '17. Entgelt Vertragsspieler'], ['82', '18. Minijobzentrale Vertragsspieler'], ['62', '19. Sonstiges'], ['63', '20. Einnahmeteilung an Gastverein']].forEach(([a, l]) => R(a, l, '', '', exp(a)));
+  R();
+  R('', 'Summe Abschnitt II', sumInc(range(37, 43)), '', sumExp([...range(44, 59), '81', '82', '62', '63']));
+  R();
+
+  // III. Wirtschaftliche Geschäftsbetriebe
+  R('III. Wirtschaftliche Geschäftsbetriebe');
+  R('1.', 'Gesellige Veranstaltungen');
+  R('', 'Einnahmen');
+  R('64', '1. Eintrittsgelder', inc('64'));
+  R('', 'Ausgaben (brutto)');
+  [['65', '1. Musik/Künstler/Hilfskräfte/Dekoration'], ['66', '2. sonstige Ausgaben'], ['67', '3. Mietkosten/Versicherungen']].forEach(([a, l]) => R(a, l, '', '', exp(a)));
+  R('2.', 'Verkauf von Speisen und Getränken');
+  R('', 'Einnahmen');
+  [['68', '1. Verkauf Speisen/Getränke inkl. 19% MWSt'], ['69', '2. Werbeeinnahmen Fußballturnier inkl. 19% MWSt']].forEach(([a, l]) => R(a, l, inc(a)));
+  R('', 'Ausgaben (brutto)');
+  [['70', '1. Einkauf Speisen inkl. 7% MSt'], ['71', '2. Einkauf Getränke inkl. 19% MSt'], ['72', '3. Betriebsmittel inkl. 19% MSt'], ['73', '4. Verkaufsgenehmigung'], ['74', '5. Gebühren inkl. 7% MSt'], ['75', '6. TV-Gebühren'], ['76', '7. Zinsen'], ['77', '8. Sonstige']].forEach(([a, l]) => R(a, l, '', '', exp(a)));
+  R('3.', 'Werbung');
+  R('78', 'Einnahmen inkl. 19% MWSt', inc('78'));
+  [['79', '1. Ausgaben'], ['80', '2. Ausgaben']].forEach(([a, l]) => R(a, l, '', '', exp(a)));
+  const iiiInc = ['64', '68', '69', '78'];
+  const iiiExp = ['65', '66', '67', '70', '71', '72', '73', '74', '75', '76', '77', '79', '80'];
+  R();
+  R('', 'Summe Abschnitt III', sumInc(iiiInc), '', sumExp(iiiExp));
+  R();
+  R();
+
+  // Gesamtübersicht
+  const incI = sumInc(range(1, 17));
+  const incII = sumInc(range(37, 43));
+  const incIII = sumInc(iiiInc);
+  const expI = sumExp(range(18, 36));
+  const expII = sumExp([...range(44, 59), '81', '82', '62', '63']);
+  const expIII = sumExp(iiiExp);
+  const totalInc = round2(incI + incII + incIII);
+  const totalExp = round2(expI + expII + expIII);
+  R('Gesamtübersicht');
+  R('', 'Einnahmen Abschnitt I', incI);
+  R('', 'Einnahmen Abschnitt II', incII);
+  R('', 'Einnahmen Abschnitt III', incIII);
+  R('', 'Einnahmen gesamt', totalInc);
+  R();
+  R('', 'Ausgaben Abschnitt I', '', '', expI);
+  R('', 'Ausgaben Abschnitt II', '', '', expII);
+  R('', 'Ausgaben Abschnitt III', '', '', expIII);
+  R('', 'Ausgaben gesamt', '', '', totalExp);
+  R();
+  R('', 'Ergebnis (Einnahmen − Ausgaben)', round2(totalInc - totalExp));
+  R();
+  R('', `Kassenbestand am 31.12.${year}`, closingBalance('cash', year));
+  R('', `Sparkasse (Bank) am 31.12.${year}`, closingBalance('bank', year));
+
+  const formSheet = XLSX.utils.aoa_to_sheet(rows);
+  formSheet['!cols'] = [{ wch: 6 }, { wch: 44 }, { wch: 14 }, { wch: 3 }, { wch: 14 }];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, formSheet, 'Jahresabschluss');
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(yearLedgerRows('bank', year)), 'Bank');
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(yearLedgerRows('cash', year)), 'Kasse');
+  XLSX.writeFile(workbook, `Jahresabschluss-${year}.xlsx`);
 }
 
 function extractAccounts(workbook) {
