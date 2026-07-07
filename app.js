@@ -1014,7 +1014,9 @@ async function handleAccountSubmit(event) {
       state.accounts.push(rowToAccount(data));
     }
   } catch (error) {
-    statusEl.textContent = 'Konto konnte nicht gespeichert werden. Ist die Spalte "tax_rate" in Supabase angelegt?';
+    const msg = 'Konto konnte nicht gespeichert werden. Ist die Spalte "tax_rate" in Supabase angelegt?\n\nSQL: alter table accounts add column if not exists tax_rate text;\n\nDetails: ' + (error?.message || 'unbekannt');
+    statusEl.textContent = 'Konto konnte nicht gespeichert werden (Spalte "tax_rate" fehlt?).';
+    window.alert(msg);
     return;
   }
 
