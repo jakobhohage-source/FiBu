@@ -83,6 +83,8 @@ const migrateBtn = document.getElementById('migrateBtn');
 const dismissMigrateBtn = document.getElementById('dismissMigrateBtn');
 
 const sortOrder = document.getElementById('sortOrder');
+const reportYear = document.getElementById('reportYear');
+const exportTaxReportBtn = document.getElementById('exportTaxReport');
 
 const filters = { year: '', month: '', type: '', vat: '' };
 let sortMode = 'dateDesc';
@@ -116,6 +118,7 @@ function init() {
   filterVat.addEventListener('change', handleFilterChange);
   filterReset.addEventListener('click', resetFilters);
   sortOrder.addEventListener('change', handleSortChange);
+  exportTaxReportBtn.addEventListener('click', exportTaxReport);
   accountFormSubmitBtn.addEventListener('click', handleAccountSubmit);
   accountFile.addEventListener('change', handleUpload);
   ledgerFile.addEventListener('change', handleLedgerImport);
@@ -507,6 +510,12 @@ function populateYearFilter() {
     filters.year = '';
     filterYear.value = '';
   }
+
+  // Jahresauswahl für die Berichte (ohne "Alle"; Standard = neuestes Jahr).
+  const reportYears = years.length ? years : [String(new Date().getFullYear())];
+  const currentReport = reportYear.value;
+  reportYear.innerHTML = reportYears.map((year) => `<option value="${year}">${year}</option>`).join('');
+  reportYear.value = reportYears.includes(currentReport) ? currentReport : reportYears[0];
 }
 
 function handleFilterChange() {
@@ -1085,6 +1094,73 @@ function exportEntries(wallet) {
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, wallet === 'all' ? 'Gesamt' : wallet === 'cash' ? 'Kasse' : 'Bank');
   XLSX.writeFile(workbook, `${wallet === 'all' ? 'Gesamt' : wallet === 'cash' ? 'Kasse' : 'Bank'}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+function round2(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+// Bericht: Zusammenfassung der steuerlichen Vorfälle (Einnahmen mit MWSt + gebuchte Vorsteuer).
+function exportTaxReport() {
+  const year = reportYear.value;
+  const yearEntries = state.entries.filter((entry) => (entry.date || '').slice(0, 4) === year);
+
+  // Einnahmen mit Steuersatz, nach Konto gruppiert.
+  const incomeVat = yearEntries
+    .filter((entry) => entry.movementType === 'income' && Number(entry.percent) > 0)
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  const groups = new Map();
+  incomeVat.forEach((entry) => {
+    const key = entry.accountCode || '—';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  });
+
+  const aoa = [];
+  aoa.push(['Polizei-Sportvereinigung Bochum e.V.', '', '', `${year} Einnahmen mit MWSt und gebuchte Vorsteuer`, '', '', '', '', '', 'Fußballabteilung']);
+  aoa.push(['', '', '', '', '', '', '', '', `USt-Berechnung Kj ${year}`]);
+  aoa.push([]);
+  aoa.push(['Datum', 'lfd. Nr.', 'Text', '%', 'Vorst. enth.', 'MWSt enth.', 'Einnahmen brutto', 'Ausgabe', 'gebucht', 'Einnahmen netto']);
+
+  let mwstTotal = 0;
+  [...groups.keys()]
+    .sort((a, b) => (Number(a) || 0) - (Number(b) || 0))
+    .forEach((accountCode) => {
+      const list = groups.get(accountCode);
+      const label = list[0].accountLabel || accountCode;
+      aoa.push([]);
+      aoa.push(['', '', label]);
+      let sumBrutto = 0;
+      let sumMwst = 0;
+      let sumNetto = 0;
+      list.forEach((entry) => {
+        const mwst = includedTax(entry);
+        const netto = entry.amount - mwst;
+        sumBrutto += entry.amount;
+        sumMwst += mwst;
+        sumNetto += netto;
+        aoa.push([entry.date, entry.statementNumber, entry.text || entry.description, `${entry.percent}%`, '', round2(mwst), round2(entry.amount), '', entry.accountCode, '']);
+      });
+      aoa.push(['', '', 'Summe', '', '', round2(sumMwst), round2(sumBrutto), '', '', round2(sumNetto)]);
+      mwstTotal += sumMwst;
+    });
+
+  // Gesamte gebuchte Vorsteuer (Ausgaben mit Steuersatz) im Jahr.
+  const vorsteuerTotal = yearEntries
+    .filter((entry) => entry.movementType === 'expense' && Number(entry.percent) > 0)
+    .reduce((sum, entry) => sum + includedTax(entry), 0);
+
+  aoa.push([]);
+  aoa.push(['', '', 'MWSt gesamt', '', '', round2(mwstTotal)]);
+  aoa.push(['', '', `Vorsteuer ${year} lt. Buchhaltung`, '', '', -round2(vorsteuerTotal)]);
+  aoa.push(['', '', `Zahllast Umsatzsteuer ${year}`, '', '', round2(mwstTotal - vorsteuerTotal)]);
+
+  const worksheet = XLSX.utils.aoa_to_sheet(aoa);
+  worksheet['!cols'] = [{ wch: 12 }, { wch: 9 }, { wch: 45 }, { wch: 5 }, { wch: 12 }, { wch: 12 }, { wch: 15 }, { wch: 10 }, { wch: 9 }, { wch: 15 }];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Steuerliche Vorfälle');
+  XLSX.writeFile(workbook, `Steuerliche-Vorfaelle-${year}.xlsx`);
 }
 
 function extractAccounts(workbook) {

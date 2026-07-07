@@ -346,6 +346,21 @@ button.secondary {
   display: block;
 }
 
+.report-panel {
+  margin-bottom: 18px;
+}
+
+.report-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.report-controls select {
+  min-width: 110px;
+}
+
 .bookkeeping-panel {
   min-width: 0;
 }
