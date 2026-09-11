@@ -482,6 +482,148 @@ button.secondary {
   font-size: 0.9rem;
 }
 
+/* --- Belege ------------------------------------------------------------- */
+
+.receipt-upload {
+  align-self: flex-start;
+}
+
+.receipt-chosen:empty {
+  display: none;
+}
+
+.receipt-current {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fcfdff;
+}
+
+.receipt-current .meta {
+  flex: 1;
+  min-width: 140px;
+  word-break: break-all;
+}
+
+.receipt-link {
+  white-space: nowrap;
+}
+
+/* --- Import-Karten und Prüfdialog --------------------------------------- */
+
+.import-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.import-cards .upload-card {
+  flex: 1;
+  min-width: 260px;
+}
+
+.import-cards .upload-card .meta {
+  font-weight: 500;
+  font-size: 0.82rem;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.modal {
+  width: 100%;
+  max-width: 1080px;
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
+
+.import-options {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fcfdff;
+}
+
+.import-table-wrap {
+  max-height: 52vh;
+}
+
+.import-table td {
+  vertical-align: middle;
+}
+
+.import-table select {
+  padding: 5px 8px;
+  font-size: 0.85rem;
+  max-width: 210px;
+}
+
+.import-table .import-text {
+  min-width: 240px;
+  max-width: 380px;
+  white-space: normal;
+}
+
+.import-table .import-party {
+  display: block;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.import-row.warn {
+  background: #fff8e6;
+}
+
+.import-flag {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fdecc8;
+  color: #8a5a00;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+/* --- Einstellungen: Regeln ---------------------------------------------- */
+
+.rule-tester {
+  margin: 14px 0 4px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fcfdff;
+}
+
+.rule-tester .status {
+  margin: 8px 0 0;
+}
+
+.rule-inactive {
+  opacity: 0.55;
+}
+
+.rule-condition code {
+  background: var(--accent-soft);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
 @media (max-width: 800px) {
   .hero, .grid, .summary, .field-row {
     grid-template-columns: 1fr;
@@ -491,5 +633,13 @@ button.secondary {
 
   .tabs {
     flex-wrap: wrap;
+  }
+
+  .modal {
+    max-height: calc(100vh - 24px);
+  }
+
+  .import-table .import-text {
+    min-width: 180px;
   }
 }

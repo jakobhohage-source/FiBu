@@ -23,8 +23,16 @@ const bookingColumns = [
   { key: 'expense', label: 'Ausgabe' },
   { key: 'booked', label: 'gebucht' },
   { key: 'konto', label: 'Konto' },
+  { key: 'receipt', label: 'Beleg' },
   { key: 'balance', label: 'Bestand' }
 ];
+
+// Ablage der Belegdateien (privater Bucket, siehe supabase-setup.sql).
+const RECEIPT_BUCKET = 'belege';
+const MAX_RECEIPT_BYTES = 10 * 1024 * 1024;
+
+const ruleFieldLabels = { any: 'Verwendungszweck & Empfänger', text: 'Verwendungszweck', party: 'Empfänger/Auftraggeber' };
+const ruleOpLabels = { contains: 'enthält', starts: 'beginnt mit', equals: 'ist genau', regex: 'Regex' };
 
 // Supabase-Client aus den Zugangsdaten in config.js erstellen.
 const supabaseClient = window.supabase.createClient(
@@ -33,10 +41,14 @@ const supabaseClient = window.supabase.createClient(
 );
 
 // In-Memory-Stand; wird nach dem Login aus Supabase geladen.
-let state = { accounts: [], entries: [] };
+let state = { accounts: [], entries: [], rules: [] };
 let realtimeChannel = null;
 let refreshTimer = null;
 let loadedUserId = null;
+// Beleg, der nach erfolgreichem Speichern aus dem Storage gelöscht werden soll.
+let receiptPathToDelete = '';
+// Laufender Kontoauszug-Import (Rohzeilen, Spaltenzuordnung, Vorschlagsliste).
+let importSession = null;
 
 const bookingForm = document.getElementById('bookingForm');
 const bookingSubmitBtn = document.getElementById('bookingSubmit');
@@ -89,6 +101,38 @@ const reportYear = document.getElementById('reportYear');
 const exportTaxReportBtn = document.getElementById('exportTaxReport');
 const exportYearReportBtn = document.getElementById('exportYearReport');
 
+const receiptFile = document.getElementById('receiptFile');
+const receiptChosen = document.getElementById('receiptChosen');
+const receiptPathInput = document.getElementById('receiptPath');
+const receiptNameInput = document.getElementById('receiptName');
+const receiptCurrent = document.getElementById('receiptCurrent');
+const receiptCurrentName = document.getElementById('receiptCurrentName');
+const receiptOpenBtn = document.getElementById('receiptOpenBtn');
+const receiptRemoveBtn = document.getElementById('receiptRemoveBtn');
+
+const statementFile = document.getElementById('statementFile');
+const importModal = document.getElementById('importModal');
+const importSummary = document.getElementById('importSummary');
+const importMapping = document.getElementById('importMapping');
+const importTableBody = document.getElementById('importTableBody');
+const importWallet = document.getElementById('importWallet');
+const importStatementNumber = document.getElementById('importStatementNumber');
+const importConfirmBtn = document.getElementById('importConfirmBtn');
+const mappingSelects = {
+  date: document.getElementById('mapDate'),
+  amount: document.getElementById('mapAmount'),
+  text: document.getElementById('mapText'),
+  party: document.getElementById('mapParty')
+};
+
+const ruleForm = document.getElementById('ruleForm');
+const ruleAccount = document.getElementById('ruleAccount');
+const rulesTableBody = document.getElementById('rulesTableBody');
+const ruleCountEl = document.getElementById('ruleCount');
+const rulesStatus = document.getElementById('rulesStatus');
+const ruleTestInput = document.getElementById('ruleTestInput');
+const ruleTestResult = document.getElementById('ruleTestResult');
+
 const filters = { year: '', month: '', type: '', vat: '' };
 let sortMode = 'dateDesc';
 
@@ -101,6 +145,7 @@ function init() {
   document.getElementById('date').value = new Date().toISOString().slice(0, 10);
   document.getElementById('booked').value = new Date().toISOString().slice(0, 10);
   renderHeaders();
+  renderReceiptField();
 
   loginForm.addEventListener('submit', handleLogin);
   logoutBtn.addEventListener('click', handleLogout);
@@ -128,6 +173,31 @@ function init() {
   accountFormSubmitBtn.addEventListener('click', handleAccountSubmit);
   accountFile.addEventListener('change', handleUpload);
   ledgerFile.addEventListener('change', handleLedgerImport);
+  statementFile.addEventListener('change', handleStatementImport);
+
+  receiptFile.addEventListener('change', handleReceiptChoice);
+  receiptOpenBtn.addEventListener('click', () => openReceipt(receiptPathInput.value));
+  receiptRemoveBtn.addEventListener('click', detachReceiptFromForm);
+
+  document.getElementById('importCloseBtn').addEventListener('click', closeImportModal);
+  document.getElementById('importCancelBtn').addEventListener('click', closeImportModal);
+  importConfirmBtn.addEventListener('click', confirmStatementImport);
+  document.getElementById('importSelectAll').addEventListener('click', () => setAllImportRows(true));
+  document.getElementById('importSelectNone').addEventListener('click', () => setAllImportRows(false));
+  importTableBody.addEventListener('change', handleImportRowChange);
+  // Kasse statt Bank ändert die Kennung der Umsätze – Vorschläge neu berechnen.
+  importWallet.addEventListener('change', refreshImportPreview);
+  Object.values(mappingSelects).forEach((select) => {
+    select.addEventListener('change', applyColumnMapping);
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !importModal.hidden) closeImportModal();
+  });
+
+  ruleForm.addEventListener('submit', handleRuleSubmit);
+  document.getElementById('ruleCancel').addEventListener('click', resetRuleForm);
+  rulesTableBody.addEventListener('click', handleRuleTableAction);
+  ruleTestInput.addEventListener('input', runRuleTest);
   cancelAccountEditBtn.addEventListener('click', resetAccountForm);
   accountsTableBody.addEventListener('click', handleAccountTableAction);
   document.querySelectorAll('.export-btn').forEach((button) => {
@@ -205,20 +275,24 @@ async function loadAndRender() {
   renderSummary();
   renderEntries();
   renderAccounts();
+  renderRules();
   setupRealtime();
   maybeOfferMigration();
 }
 
 async function loadStateFromCloud() {
-  const [accountsRes, entriesRes] = await Promise.all([
+  const [accountsRes, entriesRes, rulesRes] = await Promise.all([
     supabaseClient.from('accounts').select('*').order('code'),
-    supabaseClient.from('entries').select('*')
+    supabaseClient.from('entries').select('*'),
+    supabaseClient.from('import_rules').select('*')
   ]);
   if (accountsRes.error) throw accountsRes.error;
   if (entriesRes.error) throw entriesRes.error;
   return {
     accounts: accountsRes.data.map(rowToAccount),
-    entries: entriesRes.data.map(rowToEntry)
+    entries: entriesRes.data.map(rowToEntry),
+    // Fehlt die Tabelle noch (supabase-setup.sql nicht eingespielt), läuft der Rest weiter.
+    rules: rulesRes.error ? [] : rulesRes.data.map(rowToRule)
   };
 }
 
@@ -252,8 +326,40 @@ function rowToEntry(row) {
     preTax: Number(row.pre_tax) || 0,
     vat: Number(row.vat) || 0,
     booked: row.booked || '',
+    receiptPath: row.receipt_path || '',
+    receiptName: row.receipt_name || '',
+    importHash: row.import_hash || '',
     income: movementType === 'income' ? amount : 0,
     expense: movementType === 'expense' ? amount : 0
+  };
+}
+
+function rowToRule(row) {
+  return {
+    id: row.id,
+    active: row.active !== false,
+    priority: Number(row.priority) || 100,
+    matchField: row.match_field || 'any',
+    matchOp: row.match_op || 'contains',
+    pattern: row.pattern || '',
+    direction: row.direction || '',
+    accountCode: row.account_code || '',
+    percent: row.percent == null ? '' : String(row.percent),
+    note: row.note || ''
+  };
+}
+
+function ruleToRow(rule) {
+  return {
+    active: rule.active,
+    priority: rule.priority,
+    match_field: rule.matchField,
+    match_op: rule.matchOp,
+    pattern: rule.pattern,
+    direction: rule.direction || null,
+    account_code: rule.accountCode || null,
+    percent: rule.percent === '' ? null : String(rule.percent),
+    note: rule.note || null
   };
 }
 
@@ -271,7 +377,10 @@ function entryToRow(entry) {
     percent: entry.percent === '' || entry.percent == null ? null : String(entry.percent),
     pre_tax: entry.preTax || 0,
     vat: entry.vat || 0,
-    booked: entry.booked || null
+    booked: entry.booked || null,
+    receipt_path: entry.receiptPath || null,
+    receipt_name: entry.receiptName || null,
+    import_hash: entry.importHash || null
   };
 }
 
@@ -303,6 +412,7 @@ function setupRealtime() {
     .channel('finance-changes')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'entries' }, scheduleRefresh)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'accounts' }, scheduleRefresh)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'import_rules' }, scheduleRefresh)
     .subscribe();
 }
 
@@ -322,6 +432,7 @@ function scheduleRefresh() {
       renderSummary();
       renderEntries();
       renderAccounts();
+      renderRules();
     } catch (error) {
       // Ein fehlgeschlagenes Live-Update ist unkritisch – beim nächsten Ereignis erneut.
     }
@@ -558,9 +669,16 @@ function renderBookingTable(body, entries, wallet) {
         .map((column) => {
           const value = getBookingCellValue(entry, column, wallet);
           const cellClass = column.key === 'income' ? 'entry-amount positive' : column.key === 'expense' ? 'entry-amount negative' : '';
-          const cellContent = column.key === 'balance'
-            ? `<div class="balance-cell"><span class="balance-value">${escapeHtml(value)}</span><span class="row-actions"><button class="table-action-btn" type="button" data-action="edit" data-id="${entry.id}">Bearbeiten</button><button class="table-action-btn danger" type="button" data-action="delete" data-id="${entry.id}">Löschen</button></span></div>`
-            : escapeHtml(value);
+          let cellContent;
+          if (column.key === 'balance') {
+            cellContent = `<div class="balance-cell"><span class="balance-value">${escapeHtml(value)}</span><span class="row-actions"><button class="table-action-btn" type="button" data-action="edit" data-id="${entry.id}">Bearbeiten</button><button class="table-action-btn danger" type="button" data-action="delete" data-id="${entry.id}">Löschen</button></span></div>`;
+          } else if (column.key === 'receipt') {
+            cellContent = entry.receiptPath
+              ? `<button class="table-action-btn receipt-link" type="button" data-action="receipt" data-id="${entry.id}" title="${escapeHtml(entry.receiptName || 'Beleg öffnen')}">📎 Beleg</button>`
+              : '—';
+          } else {
+            cellContent = escapeHtml(value);
+          }
           return `<td class="${cellClass}">${cellContent}</td>`;
         })
         .join('');
@@ -656,6 +774,8 @@ function getBookingCellValue(entry, column, wallet) {
     case 'konto':
       if (!entry.accountCode) return '—';
       return entry.accountLabel ? `${entry.accountCode} · ${entry.accountLabel}` : entry.accountCode;
+    case 'receipt':
+      return entry.receiptPath ? 'Beleg' : '—';
     case 'balance':
       return wallet === 'all' && entry.totalBalance !== undefined ? formatEuro(entry.totalBalance) : entry.balance !== undefined ? formatEuro(entry.balance) : '—';
     default:
@@ -677,6 +797,29 @@ async function handleSubmit(event) {
     return;
   }
 
+  // Beleg: neue Datei hochladen, sonst den bereits hinterlegten Pfad behalten.
+  let receiptPath = receiptPathInput.value || '';
+  let receiptName = receiptNameInput.value || '';
+  const chosenReceipt = receiptFile.files && receiptFile.files[0];
+  if (chosenReceipt) {
+    if (chosenReceipt.size > MAX_RECEIPT_BYTES) {
+      showToast('Der Beleg ist größer als 10 MB.', 'error');
+      return;
+    }
+    bookingSubmitBtn.disabled = true;
+    try {
+      const uploadedPath = await uploadReceipt(chosenReceipt);
+      if (receiptPath && receiptPath !== uploadedPath) receiptPathToDelete = receiptPath;
+      receiptPath = uploadedPath;
+      receiptName = chosenReceipt.name;
+    } catch (error) {
+      showToast('Beleg konnte nicht hochgeladen werden. Ist der Bucket "belege" angelegt?', 'error');
+      return;
+    } finally {
+      bookingSubmitBtn.disabled = false;
+    }
+  }
+
   const entryData = {
     date: document.getElementById('date').value,
     amount,
@@ -691,6 +834,9 @@ async function handleSubmit(event) {
     preTax: movementType === 'expense' ? included : 0,
     vat: movementType === 'income' ? included : 0,
     booked: document.getElementById('booked').value || document.getElementById('date').value,
+    receiptPath,
+    receiptName,
+    importHash: (state.entries.find((entry) => entry.id === entryId) || {}).importHash || '',
     income: movementType === 'income' ? amount : 0,
     expense: movementType === 'expense' ? amount : 0
   };
@@ -713,9 +859,15 @@ async function handleSubmit(event) {
       state.entries.unshift(rowToEntry(data));
     }
   } catch (error) {
-    statusEl.textContent = 'Buchung konnte nicht gespeichert werden.';
+    statusEl.textContent = 'Buchung konnte nicht gespeichert werden. Wurde supabase-setup.sql bereits ausgeführt?';
     showToast('Buchung konnte nicht gespeichert werden.', 'error');
     return;
+  }
+
+  // Ersetzter oder entfernter Beleg wird erst nach erfolgreichem Speichern gelöscht.
+  if (receiptPathToDelete) {
+    await removeReceiptFile(receiptPathToDelete);
+    receiptPathToDelete = '';
   }
 
   renderSummary();
@@ -744,6 +896,11 @@ async function handleBookingTableAction(event) {
   const entry = state.entries.find((item) => item.id === button.dataset.id);
   if (!entry) return;
 
+  if (button.dataset.action === 'receipt') {
+    openReceipt(entry.receiptPath);
+    return;
+  }
+
   if (button.dataset.action === 'delete') {
     const label = entry.text || entry.description || 'diese Buchung';
     if (!window.confirm(`Buchung „${label}" wirklich löschen?`)) return;
@@ -756,6 +913,7 @@ async function handleBookingTableAction(event) {
       return;
     }
 
+    await removeReceiptFile(entry.receiptPath);
     state.entries = state.entries.filter((item) => item.id !== button.dataset.id);
     renderSummary();
     renderEntries();
@@ -781,6 +939,11 @@ function populateBookingForm(entry) {
   document.getElementById('percent').value = entry.percent || '';
   document.getElementById('description').value = entry.text || entry.description || '';
   document.getElementById('booked').value = entry.booked || entry.date || '';
+  receiptPathInput.value = entry.receiptPath || '';
+  receiptNameInput.value = entry.receiptName || '';
+  receiptFile.value = '';
+  receiptPathToDelete = '';
+  renderReceiptField();
   recalcTax();
 
   renderAccountSelect();
@@ -796,9 +959,89 @@ function resetBookingForm() {
   document.getElementById('wallet').value = 'cash';
   document.getElementById('booked').value = new Date().toISOString().slice(0, 10);
   document.getElementById('percent').value = '';
+  receiptPathInput.value = '';
+  receiptNameInput.value = '';
+  receiptFile.value = '';
+  receiptPathToDelete = '';
+  renderReceiptField();
   recalcTax();
   renderAccountSelect();
   bookingSubmitBtn.textContent = 'Buchung speichern';
+}
+
+// ---------------------------------------------------------------------------
+// Belege: Foto oder PDF je Buchung im privaten Supabase-Bucket
+// ---------------------------------------------------------------------------
+
+function renderReceiptField() {
+  const hasReceipt = Boolean(receiptPathInput.value);
+  receiptCurrent.hidden = !hasReceipt;
+  if (hasReceipt) {
+    receiptCurrentName.textContent = receiptNameInput.value || 'Beleg hinterlegt';
+  }
+  const chosen = receiptFile.files && receiptFile.files[0];
+  receiptChosen.textContent = chosen
+    ? `Ausgewählt: ${chosen.name}`
+    : hasReceipt ? 'Neue Datei wählen, um den Beleg zu ersetzen.' : '';
+}
+
+function handleReceiptChoice() {
+  const chosen = receiptFile.files && receiptFile.files[0];
+  if (chosen && chosen.size > MAX_RECEIPT_BYTES) {
+    showToast('Der Beleg ist größer als 10 MB.', 'error');
+    receiptFile.value = '';
+  }
+  renderReceiptField();
+}
+
+// Entfernt die Verknüpfung im Formular; gelöscht wird die Datei erst beim Speichern.
+function detachReceiptFromForm() {
+  if (receiptPathInput.value) receiptPathToDelete = receiptPathInput.value;
+  receiptPathInput.value = '';
+  receiptNameInput.value = '';
+  receiptFile.value = '';
+  renderReceiptField();
+  showToast('Beleg wird beim Speichern entfernt.');
+}
+
+async function uploadReceipt(file) {
+  const extension = (file.name.split('.').pop() || 'dat').toLowerCase().replace(/[^a-z0-9]/g, '') || 'dat';
+  const today = new Date().toISOString().slice(0, 10);
+  const random = Math.random().toString(36).slice(2, 10);
+  const path = `${today.slice(0, 4)}/${today}-${random}.${extension}`;
+  const { error } = await supabaseClient.storage
+    .from(RECEIPT_BUCKET)
+    .upload(path, file, { contentType: file.type || undefined, upsert: false });
+  if (error) throw error;
+  return path;
+}
+
+async function openReceipt(path) {
+  if (!path) return;
+  // Fenster vorab öffnen, damit der Popup-Blocker den Aufruf nach dem await nicht abfängt.
+  const viewer = window.open('', '_blank', 'noopener');
+  const { data, error } = await supabaseClient.storage
+    .from(RECEIPT_BUCKET)
+    .createSignedUrl(path, 300);
+  if (error || !data) {
+    if (viewer) viewer.close();
+    showToast('Beleg konnte nicht geöffnet werden.', 'error');
+    return;
+  }
+  if (viewer) {
+    viewer.location.href = data.signedUrl;
+  } else {
+    window.location.href = data.signedUrl;
+  }
+}
+
+async function removeReceiptFile(path) {
+  if (!path) return;
+  try {
+    await supabaseClient.storage.from(RECEIPT_BUCKET).remove([path]);
+  } catch (error) {
+    // Eine verwaiste Datei im Storage ist unkritisch – die Buchung ist entscheidend.
+  }
 }
 
 function handleUpload(event) {
@@ -820,6 +1063,7 @@ function handleUpload(event) {
       renderAccountSelect();
       renderSummary();
       renderAccounts();
+      renderRules();
       statusEl.textContent = `${state.accounts.length} Konten aus dem Upload geladen.`;
     } catch (error) {
       statusEl.textContent = 'Der Kontenplan konnte nicht gelesen oder gespeichert werden.';
@@ -990,6 +1234,819 @@ function parseGermanDate(value) {
   m = str.match(/^(\d{1,2})\.(\d{2})(\d{4})$/);
   if (m) return `${m[3]}-${m[2]}-${m[1].padStart(2, '0')}`;
   return '';
+}
+
+// ---------------------------------------------------------------------------
+// Kontoauszug-Import: CSV der Bank oder CAMT.053-Datei einlesen, Umsätze
+// anhand der Regeln vorbelegen und vor dem Buchen prüfen lassen.
+// ---------------------------------------------------------------------------
+
+// Suchbegriffe für die automatische Spaltenerkennung, beste Treffer zuerst.
+const HEADER_HINTS = {
+  date: ['buchungstag', 'buchungsdatum', 'wertstellung', 'valutadatum', 'valuta', 'datum'],
+  amount: ['betrag', 'umsatz', 'wert'],
+  text: ['verwendungszweck', 'buchungstext', 'vorgang', 'beschreibung', 'text'],
+  party: ['beguenstigter', 'begünstigter', 'zahlungspflichtiger', 'auftraggeber', 'empfänger', 'empfaenger', 'zahlungsbeteiligter', 'kontrahent', 'name']
+};
+
+async function handleStatementImport(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+
+  try {
+    const text = decodeBytes(await file.arrayBuffer());
+    importSession = /<\s*Document[\s>]|<\?xml/i.test(text.slice(0, 400))
+      ? parseCamtStatement(text)
+      : parseCsvStatement(text);
+
+    if (!importSession.kind) throw new Error('Format nicht erkannt.');
+    openImportModal();
+  } catch (error) {
+    window.alert('Der Kontoauszug konnte nicht gelesen werden: ' + (error?.message || 'unbekannter Fehler')
+      + '\n\nUnterstützt werden CSV-Dateien der Bank und CAMT.053-Dateien (.xml).');
+  } finally {
+    event.target.value = '';
+  }
+}
+
+// Deutsche Bankexporte kommen häufig als Windows-1252 statt UTF-8.
+function decodeBytes(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return new TextDecoder('utf-8').decode(bytes.subarray(3));
+  }
+  const asUtf8 = new TextDecoder('utf-8').decode(bytes);
+  if (!asUtf8.includes('�')) return asUtf8;
+  return new TextDecoder('windows-1252').decode(bytes);
+}
+
+function detectDelimiter(text) {
+  const sample = text.split(/\r?\n/).slice(0, 6).join('\n');
+  const best = [';', ',', '\t', '|']
+    .map((candidate) => ({ candidate, count: sample.split(candidate).length - 1 }))
+    .sort((a, b) => b.count - a.count)[0];
+  return best && best.count > 0 ? best.candidate : ';';
+}
+
+function parseCsv(text, delimiter) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (inQuotes) {
+      if (char !== '"') {
+        field += char;
+      } else if (text[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else {
+        inQuotes = false;
+      }
+      continue;
+    }
+    if (char === '"') inQuotes = true;
+    else if (char === delimiter) { row.push(field); field = ''; }
+    else if (char === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else if (char !== '\r') field += char;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function parseCsvStatement(text) {
+  const delimiter = detectDelimiter(text);
+  const rows = parseCsv(text, delimiter).filter((row) => row.some((cell) => String(cell).trim() !== ''));
+  if (rows.length < 2) throw new Error('Die Datei enthält keine auswertbaren Zeilen.');
+
+  // Manche Banken stellen der Kopfzeile Zusatzangaben voran.
+  let headerIndex = rows.findIndex((row) => {
+    const cells = row.map(normalizeHeader);
+    return cells.some((cell) => HEADER_HINTS.date.some((hint) => cell.includes(hint)))
+      && cells.some((cell) => HEADER_HINTS.amount.some((hint) => cell.includes(hint)));
+  });
+  if (headerIndex === -1) headerIndex = 0;
+
+  const headers = rows[headerIndex].map((cell) => String(cell).trim());
+  const normalized = headers.map(normalizeHeader);
+
+  return {
+    kind: 'csv',
+    headers,
+    dataRows: rows.slice(headerIndex + 1),
+    signColumn: normalized.findIndex((cell) => /soll\s*\/?\s*haben|^s\s*\/\s*h$|haben\s*\/\s*soll/.test(cell)),
+    mapping: {
+      date: guessColumn(normalized, HEADER_HINTS.date),
+      amount: guessColumn(normalized, HEADER_HINTS.amount),
+      text: guessColumn(normalized, HEADER_HINTS.text),
+      party: guessColumn(normalized, HEADER_HINTS.party)
+    },
+    items: [],
+    skipped: 0
+  };
+}
+
+function normalizeHeader(value) {
+  return String(value == null ? '' : value).trim().toLowerCase();
+}
+
+function guessColumn(normalizedHeaders, hints) {
+  for (const hint of hints) {
+    const index = normalizedHeaders.findIndex((header) => header.includes(hint));
+    if (index !== -1) return index;
+  }
+  return -1;
+}
+
+// Sammelt alle Nachfahren mit diesem Tag-Namen, unabhängig vom XML-Namensraum
+// (CAMT-Dateien kommen mal mit, mal ohne Präfix wie "ns2:Ntry").
+function collectByLocalName(root, tagName) {
+  const found = [];
+  const visit = (node) => {
+    const children = node && node.children ? node.children : [];
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      const local = child.localName || String(child.tagName || '').split(':').pop();
+      if (local === tagName) found.push(child);
+      visit(child);
+    }
+  };
+  visit(root);
+  return found;
+}
+
+// CAMT.053: jeder <Ntry> ist ein Umsatz, <CdtDbtInd> entscheidet über die Richtung.
+function parseCamtStatement(xmlText) {
+  const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+  if (doc.querySelector('parsererror')) throw new Error('Die XML-Datei ist beschädigt.');
+
+  const allTexts = (node, tagName) => collectByLocalName(node, tagName).map((element) => element.textContent.trim());
+  const localText = (node, tagName) => {
+    const texts = allTexts(node, tagName);
+    return texts.length ? texts[0] : '';
+  };
+
+  const statementNumber = localText(doc.documentElement, 'LglSeqNb') || localText(doc.documentElement, 'ElctrncSeqNb') || '';
+  const entries = collectByLocalName(doc.documentElement, 'Ntry');
+  if (!entries.length) throw new Error('In der CAMT-Datei wurden keine Umsätze gefunden.');
+
+  const camtItems = entries.map((entry) => {
+    const amount = Math.abs(Number(localText(entry, 'Amt')) || 0);
+    const movementType = localText(entry, 'CdtDbtInd') === 'DBIT' ? 'expense' : 'income';
+    const bookingDate = localText(entry, 'BookgDt') || localText(entry, 'ValDt');
+    const purpose = allTexts(entry, 'Ustrd').join(' ').replace(/\s+/g, ' ').trim();
+    const partyNames = allTexts(entry, 'Nm');
+    return {
+      date: (bookingDate || '').slice(0, 10),
+      amount,
+      movementType,
+      text: purpose || localText(entry, 'AddtlNtryInf'),
+      party: partyNames.length ? partyNames[0] : '',
+      statementNumber
+    };
+  }).filter((item) => item.date && item.amount);
+
+  return { kind: 'camt', camtItems, items: [], skipped: 0, headers: [], mapping: {}, signColumn: -1 };
+}
+
+function parseFlexibleDate(value) {
+  const raw = String(value == null ? '' : value).trim();
+  if (!raw) return '';
+
+  const german = parseGermanDate(raw);
+  if (german) return german;
+
+  let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+
+  // Zweistelliges Jahr, z. B. 04.03.25
+  match = raw.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2})$/);
+  if (match) return `20${match[3]}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}`;
+
+  match = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (match) return `${match[3]}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}`;
+
+  return '';
+}
+
+// Erkennt, ob Komma oder Punkt das Dezimaltrennzeichen ist (das zuletzt stehende).
+function parseAmountFlexible(value) {
+  let raw = String(value == null ? '' : value).trim();
+  if (!raw) return 0;
+
+  // Minus kann vor der Zahl stehen ("EUR -12,50"), dahinter ("12,50-") oder als Klammer.
+  const firstDigit = raw.search(/\d/);
+  const beforeDigits = firstDigit === -1 ? raw : raw.slice(0, firstDigit);
+  const negative = beforeDigits.includes('-') || /-\s*$/.test(raw) || /^\(.*\)$/.test(raw);
+  raw = raw.replace(/[^0-9.,]/g, '');
+  if (!raw) return 0;
+
+  const lastComma = raw.lastIndexOf(',');
+  const lastDot = raw.lastIndexOf('.');
+  let normalized;
+  if (lastComma === -1 && lastDot === -1) {
+    normalized = raw;
+  } else if (lastComma > lastDot) {
+    normalized = raw.replace(/\./g, '').replace(',', '.');
+  } else {
+    normalized = raw.replace(/,/g, '');
+  }
+
+  const amount = Number(normalized);
+  if (!Number.isFinite(amount)) return 0;
+  return negative ? -Math.abs(amount) : amount;
+}
+
+function deriveRawTransactions() {
+  if (importSession.kind === 'camt') return importSession.camtItems;
+
+  const { dataRows, mapping, signColumn } = importSession;
+  if (mapping.date < 0 || mapping.amount < 0) return [];
+
+  const cell = (row, index) => (index >= 0 ? String(row[index] == null ? '' : row[index]).replace(/\s+/g, ' ').trim() : '');
+
+  return dataRows.reduce((list, row) => {
+    const date = parseFlexibleDate(row[mapping.date]);
+    const signed = parseAmountFlexible(row[mapping.amount]);
+    if (!date || !signed) return list;
+
+    let movementType = signed < 0 ? 'expense' : 'income';
+    if (signColumn >= 0) {
+      const flag = cell(row, signColumn).toUpperCase();
+      if (flag.startsWith('S')) movementType = 'expense';
+      else if (flag.startsWith('H')) movementType = 'income';
+    }
+
+    list.push({
+      date,
+      amount: Math.abs(signed),
+      movementType,
+      text: cell(row, mapping.text),
+      party: cell(row, mapping.party),
+      statementNumber: ''
+    });
+    return list;
+  }, []);
+}
+
+// Stabile Kennung eines Umsatzes – verhindert, dass dieselbe Datei doppelt landet.
+function importHashFor(transaction, wallet) {
+  const key = [
+    wallet,
+    transaction.date,
+    transaction.amount.toFixed(2),
+    transaction.movementType,
+    `${transaction.text} ${transaction.party}`.toLowerCase().replace(/\s+/g, ' ').trim()
+  ].join('|');
+  return `${transaction.date}-${fnv1a(key)}`;
+}
+
+function fnv1a(value) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+// Gleicher Betrag und gleiche Richtung im Umkreis weniger Tage: vermutlich schon gebucht.
+function findPossibleExisting(transaction, wallet) {
+  const target = new Date(transaction.date).getTime();
+  if (!Number.isFinite(target)) return null;
+  return state.entries.find((entry) => entry.wallet === wallet
+    && entry.movementType === transaction.movementType
+    && Math.abs(entry.amount - transaction.amount) < 0.005
+    && Math.abs(new Date(entry.date).getTime() - target) <= 3 * 86400000) || null;
+}
+
+function matchesRulePattern(rule, transaction) {
+  const haystack = rule.matchField === 'text'
+    ? transaction.text || ''
+    : rule.matchField === 'party'
+      ? transaction.party || ''
+      : `${transaction.text || ''} ${transaction.party || ''}`;
+
+  const pattern = String(rule.pattern || '').trim();
+  if (!pattern) return false;
+
+  if (rule.matchOp === 'regex') {
+    try {
+      return new RegExp(pattern, 'i').test(haystack);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  const lowerHaystack = haystack.toLowerCase().replace(/\s+/g, ' ').trim();
+  const lowerPattern = pattern.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (rule.matchOp === 'starts') return lowerHaystack.startsWith(lowerPattern);
+  if (rule.matchOp === 'equals') return lowerHaystack === lowerPattern;
+  return lowerHaystack.includes(lowerPattern);
+}
+
+function findMatchingRule(transaction) {
+  return [...state.rules]
+    .filter((rule) => rule.active)
+    .filter((rule) => !rule.direction || !transaction.movementType || rule.direction === transaction.movementType)
+    .sort((a, b) => a.priority - b.priority || a.pattern.localeCompare(b.pattern, 'de'))
+    .find((rule) => matchesRulePattern(rule, transaction)) || null;
+}
+
+function prepareImportItems() {
+  const wallet = importWallet.value;
+  const transactions = deriveRawTransactions();
+
+  // Wie oft ein Umsatz bereits gebucht ist – so bleiben echte Doppelzahlungen erhalten.
+  const alreadyImported = new Map();
+  state.entries.forEach((entry) => {
+    if (!entry.importHash) return;
+    alreadyImported.set(entry.importHash, (alreadyImported.get(entry.importHash) || 0) + 1);
+  });
+
+  const seen = new Map();
+  const items = [];
+  let skipped = 0;
+
+  transactions.forEach((transaction) => {
+    const hash = importHashFor(transaction, wallet);
+    const used = seen.get(hash) || 0;
+    seen.set(hash, used + 1);
+    if (used < (alreadyImported.get(hash) || 0)) {
+      skipped++;
+      return;
+    }
+
+    const rule = findMatchingRule(transaction);
+    const account = rule && rule.accountCode
+      ? state.accounts.find((item) => item.code === rule.accountCode)
+      : null;
+    let percent = '';
+    if (rule && rule.percent !== '') percent = rule.percent === '0' ? '' : rule.percent;
+    else if (account && account.taxRate) percent = account.taxRate;
+
+    const existing = findPossibleExisting(transaction, wallet);
+    items.push({
+      ...transaction,
+      hash,
+      wallet,
+      accountCode: rule && rule.accountCode ? rule.accountCode : '',
+      percent,
+      ruleId: rule ? rule.id : '',
+      possibleDuplicate: Boolean(existing),
+      existingLabel: existing ? `${existing.date} · ${existing.text || existing.description || 'Buchung'}` : '',
+      include: !existing,
+      makeRule: false
+    });
+  });
+
+  importSession.items = items;
+  importSession.skipped = skipped;
+}
+
+function openImportModal() {
+  renderColumnMapping();
+  prepareImportItems();
+  renderImportTable();
+  importStatementNumber.value = (importSession.items[0] && importSession.items[0].statementNumber) || '';
+  importModal.hidden = false;
+}
+
+function closeImportModal() {
+  importModal.hidden = true;
+  importSession = null;
+}
+
+function renderColumnMapping() {
+  const isCsv = importSession.kind === 'csv';
+  importMapping.hidden = !isCsv;
+  if (!isCsv) return;
+
+  const options = importSession.headers
+    .map((header, index) => `<option value="${index}">${escapeHtml(header || `Spalte ${index + 1}`)}</option>`)
+    .join('');
+
+  Object.entries(mappingSelects).forEach(([field, select]) => {
+    select.innerHTML = `<option value="-1">— nicht vorhanden —</option>${options}`;
+    select.value = String(importSession.mapping[field]);
+  });
+}
+
+function refreshImportPreview() {
+  if (!importSession) return;
+  prepareImportItems();
+  renderImportTable();
+}
+
+function applyColumnMapping() {
+  if (!importSession || importSession.kind !== 'csv') return;
+  Object.entries(mappingSelects).forEach(([field, select]) => {
+    importSession.mapping[field] = Number(select.value);
+  });
+  refreshImportPreview();
+}
+
+function importAccountOptions(selectedCode) {
+  const sorted = [...state.accounts].sort((a, b) => {
+    const favDiff = (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0);
+    if (favDiff !== 0) return favDiff;
+    return a.label.localeCompare(b.label, 'de', { sensitivity: 'base' });
+  });
+  const options = sorted.map((account) => {
+    const selected = account.code === selectedCode ? ' selected' : '';
+    return `<option value="${escapeHtml(account.code)}"${selected}>${account.favorite ? '★ ' : ''}${escapeHtml(account.label)}</option>`;
+  });
+  return `<option value=""${selectedCode ? '' : ' selected'}>— kein Konto —</option>${options.join('')}`;
+}
+
+function percentOptions(selected) {
+  return ['', '7', '19']
+    .map((value) => `<option value="${value}"${String(selected) === value ? ' selected' : ''}>${value ? `${value}%` : 'Keine'}</option>`)
+    .join('');
+}
+
+function renderImportTable() {
+  const { items, skipped } = importSession;
+
+  const parts = [`${items.length} Umsatz/Umsätze zum Buchen`];
+  if (skipped) parts.push(`${skipped} bereits importiert und übersprungen`);
+  const flagged = items.filter((item) => item.possibleDuplicate).length;
+  if (flagged) parts.push(`${flagged} evtl. schon gebucht (gelb markiert, nicht vorausgewählt)`);
+  const unmatched = items.filter((item) => !item.accountCode).length;
+  if (unmatched) parts.push(`${unmatched} ohne Kontovorschlag`);
+  importSummary.textContent = parts.join(' · ');
+
+  if (!items.length) {
+    importTableBody.innerHTML = `<tr><td colspan="7">Keine neuen Umsätze gefunden.${
+      importSession.kind === 'csv' ? ' Stimmt die Spaltenzuordnung oben?' : ''
+    }</td></tr>`;
+    return;
+  }
+
+  importTableBody.innerHTML = items.map((item, index) => {
+    const amountClass = item.movementType === 'income' ? 'positive' : 'negative';
+    const sign = item.movementType === 'income' ? '+' : '−';
+    const ruleHint = item.ruleId
+      ? '<span class="import-party">Regel hat zugeordnet</span>'
+      : '';
+    const duplicateHint = item.possibleDuplicate
+      ? `<span class="import-flag">evtl. schon gebucht: ${escapeHtml(item.existingLabel)}</span>`
+      : '';
+    return `
+      <tr class="import-row${item.possibleDuplicate ? ' warn' : ''}" data-index="${index}">
+        <td><input type="checkbox" data-field="include"${item.include ? ' checked' : ''} /></td>
+        <td>${escapeHtml(item.date)}</td>
+        <td class="import-text">
+          ${escapeHtml(item.text || '—')}
+          ${item.party ? `<span class="import-party">${escapeHtml(item.party)}</span>` : ''}
+          ${ruleHint}
+          ${duplicateHint}
+        </td>
+        <td class="entry-amount ${amountClass}">${sign} ${formatEuro(item.amount)}</td>
+        <td><select data-field="accountCode">${importAccountOptions(item.accountCode)}</select></td>
+        <td><select data-field="percent">${percentOptions(item.percent)}</select></td>
+        <td><input type="checkbox" data-field="makeRule"${item.makeRule ? ' checked' : ''} title="Zuordnung als Regel für künftige Importe merken" /></td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function handleImportRowChange(event) {
+  const row = event.target.closest('tr[data-index]');
+  const field = event.target.dataset.field;
+  if (!row || !field || !importSession) return;
+
+  const item = importSession.items[Number(row.dataset.index)];
+  if (!item) return;
+
+  if (field === 'include' || field === 'makeRule') {
+    item[field] = event.target.checked;
+    return;
+  }
+
+  item[field] = event.target.value;
+
+  if (field === 'accountCode') {
+    // Steuersatz des gewählten Kontos übernehmen und die Zuordnung als Regel anbieten.
+    const account = state.accounts.find((entry) => entry.code === item.accountCode);
+    item.percent = account && account.taxRate ? account.taxRate : '';
+    const percentSelect = row.querySelector('select[data-field="percent"]');
+    if (percentSelect) percentSelect.value = item.percent;
+
+    if (item.accountCode && !item.ruleId) {
+      item.makeRule = true;
+      const ruleCheckbox = row.querySelector('input[data-field="makeRule"]');
+      if (ruleCheckbox) ruleCheckbox.checked = true;
+    }
+  }
+}
+
+function setAllImportRows(selected) {
+  if (!importSession) return;
+  importSession.items.forEach((item) => { item.include = selected; });
+  importTableBody.querySelectorAll('input[data-field="include"]').forEach((checkbox) => {
+    checkbox.checked = selected;
+  });
+}
+
+function suggestRulePattern(item) {
+  const party = (item.party || '').trim();
+  if (party.length >= 3) return { field: 'party', pattern: party.slice(0, 60) };
+  const text = (item.text || '').trim();
+  return { field: 'text', pattern: text.slice(0, 40) };
+}
+
+async function confirmStatementImport() {
+  if (!importSession) return;
+
+  const selected = importSession.items.filter((item) => item.include);
+  if (!selected.length) {
+    window.alert('Es ist kein Umsatz ausgewählt.');
+    return;
+  }
+
+  const withoutAccount = selected.filter((item) => !item.accountCode).length;
+  if (withoutAccount) {
+    const proceed = window.confirm(`${withoutAccount} von ${selected.length} Umsätzen haben kein Konto.`
+      + '\n\nSie werden ohne Konto gebucht und können später ergänzt werden. Fortfahren?');
+    if (!proceed) return;
+  }
+
+  const wallet = importWallet.value;
+  const statementNumber = importStatementNumber.value.trim();
+
+  const rows = selected.map((item) => {
+    const account = state.accounts.find((entry) => entry.code === item.accountCode);
+    const percent = item.percent || '';
+    const included = percent ? item.amount * (Number(percent) / (100 + Number(percent))) : 0;
+    const description = [item.text, item.party].filter(Boolean).join(' · ') || 'Kontoauszug';
+    return entryToRow({
+      date: item.date,
+      amount: item.amount,
+      movementType: item.movementType,
+      wallet,
+      accountCode: item.accountCode,
+      accountLabel: account ? account.label : '',
+      description,
+      statementNumber: statementNumber || item.statementNumber || '',
+      text: description,
+      percent,
+      preTax: item.movementType === 'expense' ? included : 0,
+      vat: item.movementType === 'income' ? included : 0,
+      booked: item.date,
+      receiptPath: '',
+      receiptName: '',
+      importHash: item.hash
+    });
+  });
+
+  importConfirmBtn.disabled = true;
+  try {
+    for (let i = 0; i < rows.length; i += 200) {
+      const { error } = await supabaseClient.from('entries').insert(rows.slice(i, i + 200));
+      if (error) throw error;
+    }
+
+    const createdRules = await createRulesFromImport(selected);
+
+    state = await loadStateFromCloud();
+    renderAccountSelect();
+    renderSummary();
+    renderEntries();
+    renderAccounts();
+    renderRules();
+
+    closeImportModal();
+    const ruleNote = createdRules ? ` ${createdRules} neue Regel(n) gespeichert.` : '';
+    showToast(`${rows.length} Umsätze gebucht ✓`);
+    statusEl.textContent = `${rows.length} Umsätze aus dem Kontoauszug gebucht.${ruleNote}`;
+  } catch (error) {
+    window.alert('Der Import ist fehlgeschlagen: ' + (error?.message || 'unbekannter Fehler')
+      + '\n\nWurde supabase-setup.sql bereits ausgeführt? Die Spalte "import_hash" wird benötigt.');
+  } finally {
+    importConfirmBtn.disabled = false;
+  }
+}
+
+// Aus den angehakten Zeilen Regeln anlegen, damit der nächste Import zuordnet.
+async function createRulesFromImport(selected) {
+  const candidates = selected.filter((item) => item.makeRule && item.accountCode);
+  if (!candidates.length) return 0;
+
+  const newRules = [];
+  const seen = new Set();
+  candidates.forEach((item) => {
+    const { field, pattern } = suggestRulePattern(item);
+    if (!pattern) return;
+    const key = `${field}|${pattern.toLowerCase()}|${item.accountCode}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    const alreadyKnown = state.rules.some((rule) => rule.matchField === field
+      && rule.pattern.toLowerCase() === pattern.toLowerCase()
+      && rule.accountCode === item.accountCode);
+    if (alreadyKnown) return;
+
+    newRules.push(ruleToRow({
+      active: true,
+      priority: 50,
+      matchField: field,
+      matchOp: 'contains',
+      pattern,
+      direction: item.movementType,
+      accountCode: item.accountCode,
+      percent: item.percent || '',
+      note: 'beim Kontoauszug-Import angelegt'
+    }));
+  });
+
+  if (!newRules.length) return 0;
+  const { error } = await supabaseClient.from('import_rules').insert(newRules);
+  if (error) return 0;
+  return newRules.length;
+}
+
+// ---------------------------------------------------------------------------
+// Einstellungen: Zuordnungsregeln pflegen
+// ---------------------------------------------------------------------------
+
+function renderRules() {
+  renderRuleAccountSelect();
+  ruleCountEl.textContent = `${state.rules.length} ${state.rules.length === 1 ? 'Regel' : 'Regeln'}`;
+
+  if (!state.rules.length) {
+    rulesTableBody.innerHTML = '<tr><td colspan="7">Noch keine Regeln. Lege hier welche an oder hake beim Kontoauszug-Import „Regel merken" an.</td></tr>';
+    runRuleTest();
+    return;
+  }
+
+  const sorted = [...state.rules].sort((a, b) => a.priority - b.priority || a.pattern.localeCompare(b.pattern, 'de'));
+  rulesTableBody.innerHTML = sorted.map((rule) => {
+    const account = state.accounts.find((entry) => entry.code === rule.accountCode);
+    const accountLabel = rule.accountCode
+      ? `${escapeHtml(rule.accountCode)}${account ? ` · ${escapeHtml(account.label)}` : ''}`
+      : '—';
+    const direction = rule.direction === 'income' ? 'Einnahme' : rule.direction === 'expense' ? 'Ausgabe' : 'beide';
+    return `
+      <tr class="${rule.active ? '' : 'rule-inactive'}">
+        <td>${rule.priority}</td>
+        <td class="rule-condition">${escapeHtml(ruleFieldLabels[rule.matchField] || rule.matchField)} ${escapeHtml(ruleOpLabels[rule.matchOp] || rule.matchOp)} <code>${escapeHtml(rule.pattern)}</code></td>
+        <td>${direction}</td>
+        <td>${accountLabel}</td>
+        <td>${rule.percent === '' ? 'vom Konto' : rule.percent === '0' ? 'keine' : `${escapeHtml(rule.percent)}%`}</td>
+        <td>${escapeHtml(rule.note || '—')}</td>
+        <td>
+          <button class="account-action-btn" type="button" data-action="toggle" data-id="${rule.id}">${rule.active ? 'Aktiv' : 'Inaktiv'}</button>
+          <button class="account-action-btn" type="button" data-action="edit" data-id="${rule.id}">Bearbeiten</button>
+          <button class="account-action-btn danger" type="button" data-action="delete" data-id="${rule.id}">Löschen</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  runRuleTest();
+}
+
+function renderRuleAccountSelect() {
+  const current = ruleAccount.value;
+  ruleAccount.innerHTML = importAccountOptions(current);
+  ruleAccount.value = state.accounts.some((account) => account.code === current) ? current : '';
+}
+
+async function handleRuleSubmit(event) {
+  event.preventDefault();
+
+  const pattern = document.getElementById('rulePattern').value.trim();
+  if (!pattern) return;
+
+  if (document.getElementById('ruleMatchOp').value === 'regex') {
+    try {
+      new RegExp(pattern, 'i');
+    } catch (error) {
+      rulesStatus.textContent = 'Der reguläre Ausdruck ist ungültig.';
+      return;
+    }
+  }
+
+  const id = document.getElementById('ruleId').value;
+  const rule = {
+    active: true,
+    priority: Number(document.getElementById('rulePriority').value) || 100,
+    matchField: document.getElementById('ruleMatchField').value,
+    matchOp: document.getElementById('ruleMatchOp').value,
+    pattern,
+    direction: document.getElementById('ruleDirection').value,
+    accountCode: ruleAccount.value,
+    percent: document.getElementById('rulePercent').value,
+    note: document.getElementById('ruleNote').value.trim()
+  };
+
+  try {
+    if (id) {
+      const existing = state.rules.find((entry) => entry.id === id);
+      const payload = ruleToRow({ ...rule, active: existing ? existing.active : true });
+      const { error } = await supabaseClient.from('import_rules').update(payload).eq('id', id);
+      if (error) throw error;
+      state.rules = state.rules.map((entry) => entry.id === id ? { ...rule, id, active: entry.active } : entry);
+    } else {
+      const { data, error } = await supabaseClient.from('import_rules').insert(ruleToRow(rule)).select().single();
+      if (error) throw error;
+      state.rules.push(rowToRule(data));
+    }
+  } catch (error) {
+    rulesStatus.textContent = 'Regel konnte nicht gespeichert werden. Wurde supabase-setup.sql ausgeführt?';
+    return;
+  }
+
+  resetRuleForm();
+  renderRules();
+  rulesStatus.textContent = id ? 'Regel aktualisiert.' : 'Regel gespeichert.';
+  showToast(id ? 'Regel aktualisiert ✓' : 'Regel gespeichert ✓');
+}
+
+async function handleRuleTableAction(event) {
+  const button = event.target.closest('button[data-action]');
+  if (!button) return;
+
+  const id = button.dataset.id;
+  const rule = state.rules.find((entry) => entry.id === id);
+  if (!rule) return;
+
+  if (button.dataset.action === 'toggle') {
+    try {
+      const { error } = await supabaseClient.from('import_rules').update({ active: !rule.active }).eq('id', id);
+      if (error) throw error;
+    } catch (error) {
+      rulesStatus.textContent = 'Status konnte nicht geändert werden.';
+      return;
+    }
+    rule.active = !rule.active;
+    renderRules();
+    return;
+  }
+
+  if (button.dataset.action === 'delete') {
+    if (!window.confirm(`Regel „${rule.pattern}" wirklich löschen?`)) return;
+    try {
+      const { error } = await supabaseClient.from('import_rules').delete().eq('id', id);
+      if (error) throw error;
+    } catch (error) {
+      rulesStatus.textContent = 'Regel konnte nicht gelöscht werden.';
+      return;
+    }
+    state.rules = state.rules.filter((entry) => entry.id !== id);
+    if (document.getElementById('ruleId').value === id) resetRuleForm();
+    renderRules();
+    rulesStatus.textContent = 'Regel gelöscht.';
+    return;
+  }
+
+  document.getElementById('ruleId').value = rule.id;
+  document.getElementById('ruleMatchField').value = rule.matchField;
+  document.getElementById('ruleMatchOp').value = rule.matchOp;
+  document.getElementById('rulePattern').value = rule.pattern;
+  document.getElementById('ruleDirection').value = rule.direction || '';
+  document.getElementById('rulePriority').value = rule.priority;
+  document.getElementById('rulePercent').value = rule.percent;
+  document.getElementById('ruleNote').value = rule.note || '';
+  renderRuleAccountSelect();
+  ruleAccount.value = rule.accountCode || '';
+  document.getElementById('ruleSubmit').textContent = 'Änderungen speichern';
+  activateTab('settings');
+}
+
+function resetRuleForm() {
+  ruleForm.reset();
+  document.getElementById('ruleId').value = '';
+  document.getElementById('ruleMatchField').value = 'any';
+  document.getElementById('ruleMatchOp').value = 'contains';
+  document.getElementById('ruleDirection').value = '';
+  document.getElementById('rulePriority').value = '100';
+  document.getElementById('rulePercent').value = '';
+  renderRuleAccountSelect();
+  document.getElementById('ruleSubmit').textContent = 'Regel speichern';
+}
+
+function runRuleTest() {
+  const value = ruleTestInput.value.trim();
+  if (!value) {
+    ruleTestResult.textContent = '';
+    return;
+  }
+
+  const rule = findMatchingRule({ text: value, party: value, movementType: '' });
+  if (!rule) {
+    ruleTestResult.textContent = 'Keine Regel greift bei diesem Text.';
+    return;
+  }
+
+  const account = state.accounts.find((entry) => entry.code === rule.accountCode);
+  const accountLabel = rule.accountCode
+    ? `${rule.accountCode}${account ? ` · ${account.label}` : ''}`
+    : 'kein Konto hinterlegt';
+  ruleTestResult.textContent = `Treffer: „${rule.pattern}" (Priorität ${rule.priority}) → ${accountLabel}`;
 }
 
 async function handleAccountSubmit(event) {
