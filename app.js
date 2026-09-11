@@ -41,7 +41,9 @@ const supabaseClient = window.supabase.createClient(
 );
 
 // In-Memory-Stand; wird nach dem Login aus Supabase geladen.
-let state = { accounts: [], entries: [], rules: [] };
+let state = { accounts: [], entries: [], rules: [], reminders: [], invoices: [], settings: {} };
+// Termin, dessen Buchung gerade im Formular vorbereitet wird (siehe calendar.js).
+let pendingReminderId = '';
 let realtimeChannel = null;
 let refreshTimer = null;
 let loadedUserId = null;
@@ -210,6 +212,9 @@ function init() {
     button.addEventListener('click', () => activateLedgerView(button.dataset.ledgerView));
   });
   activateLedgerView('all');
+
+  initCalendar();
+  initInvoices();
 }
 
 // ---------------------------------------------------------------------------
@@ -276,23 +281,39 @@ async function loadAndRender() {
   renderEntries();
   renderAccounts();
   renderRules();
+  renderCalendar();
+  renderInvoices();
+  renderOrgForm();
   setupRealtime();
   maybeOfferMigration();
 }
 
 async function loadStateFromCloud() {
-  const [accountsRes, entriesRes, rulesRes] = await Promise.all([
+  const [accountsRes, entriesRes, rulesRes, remindersRes, invoicesRes, settingsRes] = await Promise.all([
     supabaseClient.from('accounts').select('*').order('code'),
     supabaseClient.from('entries').select('*'),
-    supabaseClient.from('import_rules').select('*')
+    supabaseClient.from('import_rules').select('*'),
+    supabaseClient.from('reminders').select('*'),
+    supabaseClient.from('invoices').select('*'),
+    supabaseClient.from('app_settings').select('*')
   ]);
   if (accountsRes.error) throw accountsRes.error;
   if (entriesRes.error) throw entriesRes.error;
+
+  // Fehlt eine der neueren Tabellen (supabase-setup.sql nicht eingespielt),
+  // läuft der Rest der App weiter.
+  const settings = {};
+  if (!settingsRes.error) {
+    settingsRes.data.forEach((row) => { settings[row.key] = row.value || {}; });
+  }
+
   return {
     accounts: accountsRes.data.map(rowToAccount),
     entries: entriesRes.data.map(rowToEntry),
-    // Fehlt die Tabelle noch (supabase-setup.sql nicht eingespielt), läuft der Rest weiter.
-    rules: rulesRes.error ? [] : rulesRes.data.map(rowToRule)
+    rules: rulesRes.error ? [] : rulesRes.data.map(rowToRule),
+    reminders: remindersRes.error ? [] : remindersRes.data.map(rowToReminder),
+    invoices: invoicesRes.error ? [] : invoicesRes.data.map(rowToInvoice),
+    settings
   };
 }
 
@@ -413,6 +434,9 @@ function setupRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'entries' }, scheduleRefresh)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'accounts' }, scheduleRefresh)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'import_rules' }, scheduleRefresh)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'reminders' }, scheduleRefresh)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, scheduleRefresh)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_settings' }, scheduleRefresh)
     .subscribe();
 }
 
@@ -433,6 +457,8 @@ function scheduleRefresh() {
       renderEntries();
       renderAccounts();
       renderRules();
+      renderCalendar();
+      renderInvoices();
     } catch (error) {
       // Ein fehlgeschlagenes Live-Update ist unkritisch – beim nächsten Ereignis erneut.
     }
@@ -870,10 +896,22 @@ async function handleSubmit(event) {
     receiptPathToDelete = '';
   }
 
+  // Kam die Buchung aus einem Kalendertermin, rückt dieser jetzt auf den nächsten Turnus.
+  const reminderToAdvance = !entryId && pendingReminderId
+    ? state.reminders.find((reminder) => reminder.id === pendingReminderId)
+    : null;
+
   renderSummary();
   renderEntries();
   resetBookingForm();
   showToast(entryId ? 'Buchung aktualisiert ✓' : 'Buchung gespeichert ✓');
+
+  if (reminderToAdvance) {
+    await completeReminder(reminderToAdvance, true);
+    showToast(reminderToAdvance.active
+      ? `Termin „${reminderToAdvance.title}" steht wieder am ${reminderToAdvance.nextDue} an.`
+      : `Termin „${reminderToAdvance.title}" abgeschlossen ✓`);
+  }
 }
 
 function showToast(message, type = 'success') {
@@ -963,6 +1001,7 @@ function resetBookingForm() {
   receiptNameInput.value = '';
   receiptFile.value = '';
   receiptPathToDelete = '';
+  pendingReminderId = '';
   renderReceiptField();
   recalcTax();
   renderAccountSelect();
@@ -1064,6 +1103,8 @@ function handleUpload(event) {
       renderSummary();
       renderAccounts();
       renderRules();
+      renderCalendar();
+      renderInvoices();
       statusEl.textContent = `${state.accounts.length} Konten aus dem Upload geladen.`;
     } catch (error) {
       statusEl.textContent = 'Der Kontenplan konnte nicht gelesen oder gespeichert werden.';

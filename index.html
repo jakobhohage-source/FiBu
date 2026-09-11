@@ -6,8 +6,13 @@
     <title>Finanzübersicht Fußballverein</title>
     <link rel="stylesheet" href="styles.css" />
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="config.js"></script>
+    <!-- calendar.js und invoices.js definieren nur Funktionen; app.js ruft sie auf
+         und muss deshalb zuletzt kommen. -->
+    <script defer src="calendar.js"></script>
+    <script defer src="invoices.js"></script>
     <script defer src="app.js"></script>
   </head>
   <body>
@@ -75,6 +80,8 @@
       <nav class="tabs card" aria-label="Ansichten">
         <button class="tab-button active" type="button" data-tab="newBooking">Neue Buchung</button>
         <button class="tab-button" type="button" data-tab="bookings">Buchführung</button>
+        <button class="tab-button" type="button" data-tab="calendar">Kalender<span id="calendarBadge" class="tab-badge" hidden></span></button>
+        <button class="tab-button" type="button" data-tab="invoices">Rechnungen<span id="invoiceBadge" class="tab-badge" hidden></span></button>
         <button class="tab-button" type="button" data-tab="accounts">Kontenplan</button>
         <button class="tab-button" type="button" data-tab="settings">Einstellungen</button>
       </nav>
@@ -373,7 +380,293 @@
         </div>
       </section>
 
+      <section id="calendarView" class="view">
+        <div class="card">
+          <div class="list-header">
+            <h2>Anstehende Termine</h2>
+            <span id="reminderCount" class="pill">0 Termine</span>
+          </div>
+          <p class="meta">
+            Für Zahlungen, die sich wiederholen – Versicherung, Verbandsbeitrag, Hallenmiete.
+            Wird ein Termin fällig, erscheint er hier und oben am Reiter.
+          </p>
+          <div id="reminderList" class="reminder-list"></div>
+        </div>
+
+        <div class="card calendar-card">
+          <div class="list-header">
+            <h2>Jahresübersicht</h2>
+            <label class="inline-field">
+              <span>Jahr</span>
+              <select id="calendarYear"></select>
+            </label>
+          </div>
+          <div id="calendarGrid" class="calendar-grid"></div>
+        </div>
+
+        <div class="card">
+          <div class="list-header">
+            <h2>Termin anlegen</h2>
+          </div>
+          <form id="reminderForm" class="account-form">
+            <input id="reminderId" type="hidden" />
+            <label>
+              <span>Bezeichnung</span>
+              <input id="reminderTitle" type="text" placeholder="z. B. Beitrag Fußballverband" required />
+            </label>
+            <div class="field-row">
+              <label>
+                <span>Nächste Fälligkeit</span>
+                <input id="reminderNextDue" type="date" required />
+              </label>
+              <label>
+                <span>Wiederholung</span>
+                <select id="reminderInterval">
+                  <option value="year">jährlich</option>
+                  <option value="quarter">vierteljährlich</option>
+                  <option value="month">monatlich</option>
+                  <option value="once">einmalig</option>
+                </select>
+              </label>
+            </div>
+            <div class="field-row">
+              <label>
+                <span>Vorwarnung (Tage)</span>
+                <input id="reminderLeadDays" type="number" step="1" min="0" value="14" />
+              </label>
+              <label>
+                <span>Betrag (€, optional)</span>
+                <input id="reminderAmount" type="number" step="0.01" min="0" placeholder="wenn bekannt" />
+              </label>
+            </div>
+            <div class="field-row">
+              <label>
+                <span>Art</span>
+                <select id="reminderMovementType">
+                  <option value="expense">Ausgabe</option>
+                  <option value="income">Einnahme</option>
+                </select>
+              </label>
+              <label>
+                <span>Ort</span>
+                <select id="reminderWallet">
+                  <option value="bank">Bank</option>
+                  <option value="cash">Kasse</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              <span>Konto (optional)</span>
+              <select id="reminderAccount"></select>
+            </label>
+            <label>
+              <span>Notiz (optional)</span>
+              <input id="reminderNote" type="text" placeholder="z. B. Rechnung kommt per Post" />
+            </label>
+            <div class="form-actions">
+              <button id="reminderSubmit" type="submit">Termin speichern</button>
+              <button id="reminderCancel" class="secondary" type="button">Abbrechen</button>
+            </div>
+          </form>
+          <p id="reminderStatus" class="status"></p>
+        </div>
+      </section>
+
+      <section id="invoicesView" class="view">
+        <div class="card">
+          <div class="list-header">
+            <h2 id="invoiceFormTitle">Neue Rechnung</h2>
+            <span id="invoiceNumberPreview" class="pill"></span>
+          </div>
+          <form id="invoiceForm" class="account-form">
+            <input id="invoiceId" type="hidden" />
+            <div class="field-row">
+              <label>
+                <span>Rechnungsnummer</span>
+                <input id="invoiceNumber" type="text" required />
+              </label>
+              <label>
+                <span>Rechnungsdatum</span>
+                <input id="invoiceDate" type="date" required />
+              </label>
+            </div>
+            <div class="field-row">
+              <label>
+                <span>Empfänger</span>
+                <input id="invoiceRecipient" type="text" placeholder="z. B. Sparkasse Bochum" required />
+              </label>
+              <label>
+                <span>Zahlbar bis (optional)</span>
+                <input id="invoiceDueDate" type="date" />
+              </label>
+            </div>
+            <label>
+              <span>Anschrift des Empfängers</span>
+              <textarea id="invoiceAddress" rows="3" placeholder="Dr.-Ruer-Platz 5&#10;44787 Bochum"></textarea>
+            </label>
+            <label>
+              <span>Leistungszeitraum (optional)</span>
+              <input id="invoiceServicePeriod" type="text" placeholder="z. B. Saison 2025/2026" />
+            </label>
+
+            <div class="positions-block">
+              <div class="list-header compact">
+                <h3>Positionen</h3>
+                <button id="invoiceAddPosition" class="secondary" type="button">Position hinzufügen</button>
+              </div>
+              <div class="table-wrap">
+                <table class="entries-table positions-table">
+                  <thead>
+                    <tr>
+                      <th>Bezeichnung</th>
+                      <th>Menge</th>
+                      <th>Einzelpreis netto</th>
+                      <th>MwSt</th>
+                      <th>Summe netto</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="positionsTableBody"></tbody>
+                </table>
+              </div>
+              <div id="invoiceTotals" class="invoice-totals"></div>
+            </div>
+
+            <div class="field-row">
+              <label>
+                <span>Ertragskonto für die spätere Buchung</span>
+                <select id="invoiceAccount"></select>
+              </label>
+              <label>
+                <span>Zahlungseingang erwartet auf</span>
+                <select id="invoiceWallet">
+                  <option value="bank">Bank</option>
+                  <option value="cash">Kasse</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              <span>Interne Notiz (erscheint nicht auf der Rechnung)</span>
+              <input id="invoiceNote" type="text" />
+            </label>
+
+            <div class="form-actions">
+              <button id="invoiceSubmit" type="submit">Rechnung speichern</button>
+              <button id="invoicePreviewBtn" class="secondary" type="button">PDF ansehen</button>
+              <button id="invoiceCancel" class="secondary" type="button">Abbrechen</button>
+            </div>
+          </form>
+          <p id="invoiceStatus" class="status"></p>
+        </div>
+
+        <div class="card">
+          <div class="list-header">
+            <h2>Gestellte Rechnungen</h2>
+            <span id="invoiceOpenSum" class="pill"></span>
+          </div>
+          <div class="ledger-filters">
+            <label>
+              <span>Status</span>
+              <select id="invoiceFilterStatus">
+                <option value="">Alle</option>
+                <option value="open">Offen</option>
+                <option value="paid">Bezahlt</option>
+                <option value="cancelled">Storniert</option>
+              </select>
+            </label>
+            <label>
+              <span>Jahr</span>
+              <select id="invoiceFilterYear">
+                <option value="">Alle Jahre</option>
+              </select>
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table class="entries-table">
+              <thead>
+                <tr>
+                  <th>Nummer</th>
+                  <th>Datum</th>
+                  <th>Empfänger</th>
+                  <th>Betrag</th>
+                  <th>Status</th>
+                  <th>Aktion</th>
+                </tr>
+              </thead>
+              <tbody id="invoicesTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <section id="settingsView" class="view">
+        <div class="card">
+          <div class="list-header">
+            <h2>Vereinsdaten</h2>
+          </div>
+          <p class="meta">Diese Angaben stehen im Kopf und im Fuß jeder Rechnung.</p>
+          <form id="orgForm" class="account-form">
+            <div class="field-row">
+              <label>
+                <span>Verein</span>
+                <input id="orgName" type="text" placeholder="Polizei-Sportvereinigung Bochum e.V." />
+              </label>
+              <label>
+                <span>Abteilung</span>
+                <input id="orgDepartment" type="text" placeholder="Abt. Fußball" />
+              </label>
+            </div>
+            <div class="field-row">
+              <label>
+                <span>Ansprechpartner</span>
+                <input id="orgContact" type="text" placeholder="Jakob Hohage" />
+              </label>
+              <label>
+                <span>Funktion</span>
+                <input id="orgRole" type="text" placeholder="Kassenwart Fußballabteilung" />
+              </label>
+            </div>
+            <div class="field-row">
+              <label>
+                <span>Straße</span>
+                <input id="orgStreet" type="text" placeholder="Hermannshöhe 15" />
+              </label>
+              <label>
+                <span>PLZ und Ort</span>
+                <input id="orgCity" type="text" placeholder="44789 Bochum" />
+              </label>
+            </div>
+            <div class="field-row">
+              <label>
+                <span>Bank</span>
+                <input id="orgBank" type="text" placeholder="Sparkasse Bochum" />
+              </label>
+              <label>
+                <span>IBAN</span>
+                <input id="orgIban" type="text" placeholder="DE66 4305 0001 0041 3090 71" />
+              </label>
+            </div>
+            <div class="field-row">
+              <label>
+                <span>Steuernummer</span>
+                <input id="orgTaxNumber" type="text" placeholder="z. B. 350/5555/1234" />
+              </label>
+              <label>
+                <span>USt-IdNr. (falls vorhanden)</span>
+                <input id="orgVatId" type="text" placeholder="DE123456789" />
+              </label>
+            </div>
+            <label>
+              <span>Fußzeile der Rechnung (optional)</span>
+              <input id="orgFooter" type="text" placeholder="z. B. Freistellungsbescheid des Finanzamts Bochum-Süd vom 12.03.2024" />
+            </label>
+            <div class="form-actions">
+              <button id="orgSubmit" type="submit">Vereinsdaten speichern</button>
+            </div>
+          </form>
+          <p id="orgStatus" class="status"></p>
+        </div>
+
         <div class="card">
           <div class="list-header">
             <h2>Zuordnungsregeln</h2>
@@ -542,6 +835,38 @@
           <button id="importCancelBtn" class="secondary" type="button">Abbrechen</button>
         </div>
       </div>
+    </div>
+
+    <div id="payModal" class="modal-overlay" hidden>
+      <form id="payForm" class="modal card modal-narrow">
+        <div class="list-header">
+          <h2>Zahlungseingang buchen</h2>
+        </div>
+        <p id="paySummary" class="status"></p>
+        <input id="payInvoiceId" type="hidden" />
+        <div class="field-row">
+          <label>
+            <span>Zahldatum</span>
+            <input id="payDate" type="date" required />
+          </label>
+          <label>
+            <span>Eingegangen auf</span>
+            <select id="payWallet">
+              <option value="bank">Bank</option>
+              <option value="cash">Kasse</option>
+            </select>
+          </label>
+        </div>
+        <label>
+          <span>Ertragskonto</span>
+          <select id="payAccount"></select>
+        </label>
+        <p class="meta">Es entsteht eine Einnahme-Buchung über den Bruttobetrag. Der Steuersatz wird aus den Rechnungspositionen übernommen.</p>
+        <div class="form-actions">
+          <button id="payConfirmBtn" type="submit">Buchung anlegen</button>
+          <button id="payCancelBtn" class="secondary" type="button">Abbrechen</button>
+        </div>
+      </form>
     </div>
   </body>
 </html>

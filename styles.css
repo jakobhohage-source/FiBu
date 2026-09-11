@@ -222,11 +222,16 @@ label span {
   color: var(--muted);
 }
 
-input, select, button {
+input, select, button, textarea {
   font: inherit;
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid var(--border);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 60px;
 }
 
 button {
@@ -624,6 +629,227 @@ button.secondary {
   padding: 1px 6px;
 }
 
+/* --- Kalender ------------------------------------------------------------ */
+
+.tab-badge {
+  display: inline-block;
+  margin-left: 7px;
+  min-width: 19px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--negative);
+  color: #fff;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.tab-button.active .tab-badge {
+  background: #fff;
+  color: var(--negative);
+}
+
+.inline-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.reminder-list {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.reminder-group-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+
+.reminder-group-title.overdue { color: var(--negative); }
+.reminder-group-title.due { color: #8a5a00; }
+
+.reminder-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border);
+  border-radius: 12px;
+  background: #fcfdff;
+}
+
+.reminder-card.overdue { border-left-color: var(--negative); background: #fdf2f2; }
+.reminder-card.due { border-left-color: #f5a623; background: #fff8e6; }
+.reminder-card.upcoming { border-left-color: var(--accent); }
+.reminder-card.inactive { opacity: 0.6; }
+
+.reminder-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 200px;
+}
+
+.reminder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.calendar-card {
+  margin-top: 18px;
+}
+
+.calendar-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+
+.calendar-month {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fcfdff;
+  min-height: 92px;
+}
+
+.calendar-month.current {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.calendar-month h4 {
+  margin: 0 0 8px;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.calendar-entry {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-align: left;
+}
+
+.calendar-entry.overdue { border-color: var(--negative); color: var(--negative); }
+.calendar-entry.due { border-color: #f5a623; color: #8a5a00; }
+.calendar-entry.past { opacity: 0.55; }
+
+.calendar-day {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.calendar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calendar-empty {
+  margin: 0;
+  color: var(--border);
+}
+
+/* --- Rechnungen ---------------------------------------------------------- */
+
+.positions-block {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fcfdff;
+}
+
+.positions-table td {
+  vertical-align: top;
+}
+
+.positions-table textarea {
+  width: 100%;
+  min-width: 220px;
+  min-height: 52px;
+  padding: 7px 9px;
+  font-size: 0.85rem;
+}
+
+.positions-table input,
+.positions-table select {
+  width: 100%;
+  min-width: 78px;
+  padding: 7px 9px;
+  font-size: 0.85rem;
+}
+
+.invoice-totals {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 12px;
+  margin-left: auto;
+  max-width: 330px;
+}
+
+.invoice-totals div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--muted);
+}
+
+.invoice-total-gross {
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.invoice-total-gross span {
+  color: var(--text);
+}
+
+.invoice-status {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.invoice-status.paid { background: #e6f4ea; color: var(--positive); }
+.invoice-status.cancelled { background: #eef1f5; color: var(--muted); }
+.invoice-status.overdue { background: #fdecc8; color: #8a5a00; }
+
+.invoice-overdue td {
+  background: #fffaf0;
+}
+
+.modal-narrow {
+  max-width: 460px;
+}
+
 @media (max-width: 800px) {
   .hero, .grid, .summary, .field-row {
     grid-template-columns: 1fr;
@@ -641,5 +867,13 @@ button.secondary {
 
   .import-table .import-text {
     min-width: 180px;
+  }
+
+  .calendar-grid {
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  }
+
+  .invoice-totals {
+    max-width: none;
   }
 }
